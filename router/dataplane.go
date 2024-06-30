@@ -1036,6 +1036,7 @@ func (p *scionPacketProcessor) reset() error {
 	p.srcAddr = nil
 	p.ingressID = 0
 	//p.scionLayer // cannot easily be reset
+	// TODO(lars): reset INT layer
 	p.path = nil
 	p.hopField = path.HopField{}
 	p.infoField = path.InfoField{}
@@ -1065,14 +1066,29 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 
 	// parse SCION header and skip extensions;
 	var err error
-	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.hbhLayer, &p.e2eLayer)
+	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.intLayer, &p.hbhLayer, &p.e2eLayer)
 	if err != nil {
 		return processResult{}, err
 	}
 
-	pld := p.lastLayer.LayerPayload()
+	res, err := p.processPath()
+	if err != nil {
+		return res, err
+	}
 
+	if p.scionLayer.NextHdr == slayers.IDINTClass {
+		if err = p.processInt(); err != nil {
+			return res, err
+		}
+	}
+
+	return res, err
+}
+
+func (p *scionPacketProcessor) processPath() (processResult, error) {
+	pld := p.lastLayer.LayerPayload()
 	pathType := p.scionLayer.PathType
+
 	switch pathType {
 	case empty.PathType:
 		if p.lastLayer.NextLayerType() == layers.LayerTypeBFD {
@@ -1096,6 +1112,11 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	default:
 		return processResult{}, serrors.WithCtx(unsupportedPathType, "type", pathType)
 	}
+}
+
+func (p *scionPacketProcessor) processInt() error {
+	// TODO(lars)
+	return nil
 }
 
 func (p *scionPacketProcessor) processInterBFD(oh *onehop.Path, data []byte) error {
@@ -1221,9 +1242,10 @@ type scionPacketProcessor struct {
 
 	// scionLayer is the SCION gopacket layer.
 	scionLayer slayers.SCION
+	intLayer   slayers.IDINT
 	hbhLayer   slayers.HopByHopExtnSkipper
 	e2eLayer   slayers.EndToEndExtnSkipper
-	// last is the last parsed layer, i.e. either &scionLayer, &hbhLayer or &e2eLayer
+	// last is the last parsed layer, i.e. either &scionLayer, &intLayer, &hbhLayer or &e2eLayer
 	lastLayer gopacket.DecodingLayer
 
 	// path is the raw SCION path. Will be set during processing.
@@ -2507,6 +2529,7 @@ func (p *slowPathPacketProcessor) hasValidAuth(t time.Time) bool {
 	if err != nil {
 		return false
 	}
+	// TODO(lars): See this for how to get DRKey and compute CMAC
 	key, err := p.drkeyProvider.GetKeyWithinAcceptanceWindow(
 		t,
 		authOption.TimestampSN(),
@@ -2562,6 +2585,8 @@ func decodeLayers(data []byte, base gopacket.DecodingLayer,
 func nextHdr(layer gopacket.DecodingLayer) slayers.L4ProtocolType {
 	switch v := layer.(type) {
 	case *slayers.SCION:
+		return v.NextHdr
+	case *slayers.IdIntSkipper:
 		return v.NextHdr
 	case *slayers.EndToEndExtnSkipper:
 		return v.NextHdr

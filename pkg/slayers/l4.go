@@ -29,6 +29,7 @@ const (
 
 	HopByHopClass L4ProtocolType = 200
 	End2EndClass  L4ProtocolType = 201
+	IDINTClass    L4ProtocolType = 253 // for testing
 )
 
 func (p L4ProtocolType) String() string {
@@ -47,6 +48,8 @@ func (p L4ProtocolType) String() string {
 		return "HopByHop"
 	case End2EndClass:
 		return "End2End"
+	case IDINTClass:
+		return "IDINT"
 	}
 	return fmt.Sprintf("UNKNOWN (%d)", p)
 }

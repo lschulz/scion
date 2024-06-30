@@ -297,8 +297,25 @@ func decodeSCION(data []byte, pb gopacket.PacketBuilder) error {
 // in a SCION base header.
 func scionNextLayerType(t L4ProtocolType) gopacket.LayerType {
 	switch t {
+	case IDINTClass:
+		return LayerTypeIDINT
 	case HopByHopClass:
 		return LayerTypeHopByHopExtn
+	case End2EndClass:
+		return LayerTypeEndToEndExtn
+	default:
+		return scionNextLayerTypeL4(t)
+	}
+}
+
+// scionNextLayerTypeAfterINT returns the layer type for the given protocol
+// identifier in a ID-INT header, excluding (repeated) ID-INT headers
+func scionNextLayerTypeAfterINT(t L4ProtocolType) gopacket.LayerType {
+	switch t {
+	case IDINTClass:
+		return gopacket.LayerTypeDecodeFailure
+	case HopByHopClass:
+		return gopacket.LayerTypeDecodeFailure
 	case End2EndClass:
 		return LayerTypeEndToEndExtn
 	default:
@@ -311,6 +328,8 @@ func scionNextLayerType(t L4ProtocolType) gopacket.LayerType {
 // extensions.
 func scionNextLayerTypeAfterHBH(t L4ProtocolType) gopacket.LayerType {
 	switch t {
+	case IDINTClass:
+		return gopacket.LayerTypeDecodeFailure
 	case HopByHopClass:
 		return gopacket.LayerTypeDecodeFailure
 	case End2EndClass:
@@ -325,6 +344,8 @@ func scionNextLayerTypeAfterHBH(t L4ProtocolType) gopacket.LayerType {
 // misordered) hop-by-hop extensions or (repeated) end-to-end extensions.
 func scionNextLayerTypeAfterE2E(t L4ProtocolType) gopacket.LayerType {
 	switch t {
+	case IDINTClass:
+		return gopacket.LayerTypeDecodeFailure
 	case HopByHopClass:
 		return gopacket.LayerTypeDecodeFailure
 	case End2EndClass:
