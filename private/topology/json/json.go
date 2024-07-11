@@ -93,6 +93,7 @@ type ServerInfo struct {
 
 // BRInfo contains Border Router specific information.
 type BRInfo struct {
+	ID           uint32                           `json:"id"`
 	InternalAddr string                           `json:"internal_addr"`
 	Interfaces   map[common.IFIDType]*BRInterface `json:"interfaces"`
 }

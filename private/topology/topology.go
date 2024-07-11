@@ -92,6 +92,7 @@ type (
 	// struct.
 	BRInfo struct {
 		Name string
+		ID   uint32
 		// InternalAddr is the local data-plane address.
 		InternalAddr netip.AddrPort
 		// IFIDs is a sorted list of the interface IDs.
@@ -266,6 +267,7 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 		}
 		brInfo := BRInfo{
 			Name:         name,
+			ID:           rawBr.ID,
 			InternalAddr: intAddr,
 			IFs:          make(map[common.IFIDType]*IFInfo),
 		}

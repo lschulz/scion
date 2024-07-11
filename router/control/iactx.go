@@ -33,6 +33,8 @@ type Config struct {
 	Topo topology.Topology
 	// IA is the current ISD-AS.
 	IA addr.IA
+	// RouterID is an AS-wide unique integer identifying the router
+	RouterID uint32
 	// BR is the topology information of this router.
 	BR *topology.BRInfo
 	// MasterKeys holds the local AS master keys.

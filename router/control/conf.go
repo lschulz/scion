@@ -31,7 +31,7 @@ import (
 // Dataplane is the interface that a dataplane has to support to be controlled
 // by this controller.
 type Dataplane interface {
-	CreateIACtx(ia addr.IA) error
+	CreateIACtx(ia addr.IA, routerID uint32) error
 	AddInternalInterface(ia addr.IA, local netip.AddrPort) error
 	AddExternalInterface(localIfID common.IFIDType, info LinkInfo, owned bool) error
 	AddSvc(ia addr.IA, svc addr.SVC, a *net.UDPAddr) error
@@ -117,7 +117,7 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 		return serrors.New("empty configuration")
 	}
 	// Set ISD-AS
-	if err := dp.CreateIACtx(cfg.IA); err != nil {
+	if err := dp.CreateIACtx(cfg.IA, cfg.RouterID); err != nil {
 		return err
 	}
 	// Set Keys

@@ -103,6 +103,7 @@ type DataPlane struct {
 	macFactory          func() hash.Hash
 	bfdSessions         map[uint16]bfdSession
 	localIA             addr.IA
+	routerID            uint32
 	mtx                 sync.Mutex
 	running             bool
 	Metrics             *Metrics
@@ -157,8 +158,8 @@ type drkeyProvider interface {
 	) (drkey.ASHostKey, error)
 }
 
-// SetIA sets the local IA for the dataplane.
-func (d *DataPlane) SetIA(ia addr.IA) error {
+// SetIA sets the local IA and router ID for the dataplane.
+func (d *DataPlane) SetIA(ia addr.IA, id uint32) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.running {
@@ -171,6 +172,7 @@ func (d *DataPlane) SetIA(ia addr.IA) error {
 		return alreadySet
 	}
 	d.localIA = ia
+	d.routerID = id
 	return nil
 }
 
@@ -1022,8 +1024,12 @@ func readUpTo(c <-chan packet, n int, needsBlocking bool, pkts []packet) int {
 
 func newPacketProcessor(d *DataPlane) *scionPacketProcessor {
 	p := &scionPacketProcessor{
-		d:              d,
-		buffer:         gopacket.NewSerializeBuffer(),
+		d:      d,
+		buffer: gopacket.NewSerializeBuffer(),
+		drkeyProvider: &drkeyutil.FakeProvider{
+			EpochDuration:    drkeyutil.LoadEpochDuration(),
+			AcceptanceWindow: drkeyutil.LoadAcceptanceWindow(),
+		},
 		mac:            d.macFactory(),
 		macInputBuffer: make([]byte, max(path.MACBufferSize, libepic.MACBufferSize)),
 	}
@@ -1036,12 +1042,13 @@ func (p *scionPacketProcessor) reset() error {
 	p.srcAddr = nil
 	p.ingressID = 0
 	//p.scionLayer // cannot easily be reset
-	// TODO(lars): reset INT layer
+	p.intLayer = slayers.IDINT{}
 	p.path = nil
 	p.hopField = path.HopField{}
 	p.infoField = path.InfoField{}
 	p.effectiveXover = false
 	p.peering = false
+	p.hopIndex = 0
 	if err := p.buffer.Clear(); err != nil {
 		return serrors.WrapStr("Failed to clear buffer", err)
 	}
@@ -1077,7 +1084,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	}
 
 	if p.scionLayer.NextHdr == slayers.IDINTClass {
-		if err = p.processInt(); err != nil {
+		if err = p.processInt(res); err != nil {
 			return res, err
 		}
 	}
@@ -1114,9 +1121,223 @@ func (p *scionPacketProcessor) processPath() (processResult, error) {
 	}
 }
 
-func (p *scionPacketProcessor) processInt() error {
-	// TODO(lars)
+func (p *scionPacketProcessor) processInt(res processResult) error {
+	firstBr := res.TrafficType == ttIn || res.TrafficType == ttInTransit || res.TrafficType == ttBrTransit
+	lastBr := res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
+
+	// Check delay and remaining hop count
+	if p.intLayer.DelayHops > 0 {
+		if lastBr {
+			p.intLayer.DelayHops--
+		}
+		return nil
+	}
+	if p.intLayer.RemHopCnt == 0 {
+		p.intLayer.MaxHopCntExceeded = true
+		return nil
+	} else if lastBr {
+		p.intLayer.RemHopCnt--
+	}
+
+	// Parse the current top of stack
+	tos := slayers.IntStackEntry{}
+	if err := tos.DecodeFromBytes(p.intLayer.TelemetryStack); err != nil {
+		return err
+	}
+	origTosLen := tos.Length()
+
+	// Prepare requested telemetry
+	metadata := p.getTelemetry(res)
+
+	// Determine whether to push a new stack entry
+	var newEntry bool
+	if tos.SourceMetadata || firstBr {
+		newEntry = true
+	} else {
+		switch p.intLayer.AggregationMode {
+		case slayers.IntAggrUnlimited:
+			newEntry = true
+		case slayers.IntAggrPerAS:
+			newEntry = false
+		case slayers.IntAggrPerBr:
+			newEntry = lastBr
+		case slayers.IntAggrPerIntRtr: // this router is never an internal router
+			newEntry = lastBr
+		default:
+			return serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
+		}
+	}
+	if !newEntry {
+		if tos.HopIndex != p.hopIndex {
+			// previous sibling router did not push telemetry data, can't merge
+			newEntry = true
+		}
+	}
+
+	if newEntry {
+		// Create a new entry
+		tos = slayers.IntStackEntry{
+			Ingress:  res.TrafficType == ttIn || res.TrafficType == ttInTransit,
+			Egress:   res.TrafficType == ttOut || res.TrafficType == ttOutTransit,
+			HopIndex: p.hopIndex,
+		}
+		if err := tos.SetMetadata(&metadata); err != nil {
+			return nil
+		}
+	} else {
+		// Update metadata in the existing entry
+		md, err := tos.GetMetadata()
+		if err != nil {
+			return err
+		}
+		md.Merge(p.intLayer.AggregationFunc, &metadata)
+		if err := tos.SetMetadata(md); err != nil {
+			return nil
+		}
+	}
+
+	// Encrypt and calculate MAC only at the last BR before leaving the AS or
+	// delivering to the end host. We trust intra-AS links.
+	var key drkey.ASHostKey
+	if lastBr {
+		var verifIA addr.IA
+		var verifHost []byte
+		switch p.intLayer.Verifier {
+		case slayers.IntVerifSrc:
+			verifIA = p.scionLayer.SrcIA
+			verifHost = p.scionLayer.RawSrcAddr
+		case slayers.IntVerifDest:
+			verifIA = p.scionLayer.DstIA
+			verifHost = p.scionLayer.RawDstAddr
+		case slayers.IntVerifThirdParty:
+			verifIA = p.intLayer.VerifIA
+			verifHost = p.intLayer.RawVerifAddr
+		default:
+			return serrors.New("invalid ID-INT verifier", "verifier", p.intLayer.Verifier)
+		}
+		ip, ok := netip.AddrFromSlice(verifHost)
+		if !ok {
+			return serrors.New("invalid ID-INT verifier host address", "address", verifHost)
+		}
+		var err error
+		key, err = p.drkeyProvider.GetASHostKey(time.Now(), verifIA, addr.HostIP(ip))
+		if err != nil {
+			return err
+		}
+		if p.intLayer.Encrypt {
+			var nonce [slayers.IntNonceLen]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return err
+			}
+			if err := tos.Encrypt(key.Key[:], nonce[:]); err != nil {
+				return err
+			}
+		}
+	}
+
+	var growBy int
+	if newEntry {
+		growBy = tos.Length()
+	} else {
+		if origTosLen == tos.Length() {
+			// length didn't change, update in-place
+			tos.SerializeToSlice(p.intLayer.TelemetryStack)
+			growBy = 0
+		} else {
+			growBy = tos.Length() - origTosLen
+			if growBy < 0 {
+				panic("ID-INT stack entry shrinking")
+			}
+		}
+	}
+	const MaxSize int = 1300 // TODO(lschulz): Determine from path MTU
+	if len(p.rawPkt)+growBy > MaxSize {
+		p.intLayer.MtuExceeded = true
+	}
+
+	// Update main header in place
+	if _, err := p.intLayer.SerializeToSlice(p.intLayer.LayerContents()); err != nil {
+		return err
+	}
+
+	// Insert new entry
+	if len(p.rawPkt)+growBy <= MaxSize {
+		intLayerOffset := cap(p.rawPkt) - cap(p.intLayer.Payload)
+		stackOffset := intLayerOffset + p.intLayer.Length() - p.intLayer.TrueStackLength()
+		p.rawPkt = append(p.rawPkt[:stackOffset], p.rawPkt[stackOffset+growBy:]...)
+		newTos := p.rawPkt[stackOffset : stackOffset+tos.Length()]
+		if _, err := tos.SerializeToSlice(newTos); err != nil {
+			return err
+		}
+
+		if lastBr {
+			// at this point there must be at least two entries on the telemetry stack (source + our entry)
+			prevEntry := slayers.IntStackEntry{}
+			if err := prevEntry.DecodeFromBytes(p.rawPkt[stackOffset+tos.Length():]); err != nil {
+				return nil
+			}
+
+			// recalculate MAC in-place
+			h, err := scrypto.InitMac(key.Key[:])
+			if err != nil {
+				return err
+			}
+			tos.UpdateMacInPlace(h, newTos, prevEntry.Mac)
+		}
+	}
+
 	return nil
+}
+
+func (p *scionPacketProcessor) getTelemetry(res processResult) slayers.IntMetadata {
+	md := slayers.IntMetadata{}
+
+	// Bitmap-controlled metadata
+	if p.intLayer.InstructionBitmap&slayers.IntBitNodeId != 0 {
+		md.NodeId = p.d.routerID
+		md.NodeIdValid = true
+	}
+	if p.intLayer.InstructionBitmap&slayers.IntBitNodeCnt != 0 {
+		md.NodeCnt = 1
+		md.NodeCntValid = true
+	}
+	if p.intLayer.InstructionBitmap&slayers.IntBitIgrIf != 0 {
+		md.IgrIf = p.ingressID
+		md.IgrIfValid = true
+	}
+	if p.intLayer.InstructionBitmap&slayers.IntBitEgrIf != 0 {
+		md.EgrIf = res.EgressID
+		md.EgrIfValid = true
+	}
+
+	// Instruction-controlled metadata
+	for i := 0; i < 4; i++ {
+		switch p.intLayer.Instruction[i] {
+		case slayers.IntInstZero2:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = 0
+		case slayers.IntInstIsd:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.localIA.ISD())
+		case slayers.IntInstZero4:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = 0
+		case slayers.IntInstNodeIpv4Addr:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(0)
+		case slayers.IntInstZero6:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = 0
+		case slayers.IntInstZero8:
+			md.InstrDataLen[i] = 8
+			md.InstrData[i] = 0
+		default:
+			md.InstrDataLen[i] = 0
+			md.InstrData[i] = 0
+		}
+	}
+
+	return md
 }
 
 func (p *scionPacketProcessor) processInterBFD(oh *onehop.Path, data []byte) error {
@@ -1258,6 +1479,10 @@ type scionPacketProcessor struct {
 	effectiveXover bool
 	// peering indicates that the hop field being processed is a peering hop field.
 	peering bool
+	// index of the first hop field processed by this router
+	hopIndex uint8
+	// key provider for INT
+	drkeyProvider drkeyProvider
 
 	// cachedMac contains the full 16 bytes of the MAC. Will be set during processing.
 	// For a hop performing an Xover, it is the MAC corresponding to the down segment.
@@ -1332,6 +1557,7 @@ func (p *scionPacketProcessor) parsePath() (processResult, error) {
 		// TODO(lukedirtwalker) parameter problem invalid path?
 		return processResult{}, err
 	}
+	p.hopIndex = p.path.PathMeta.CurrHF
 	return processResult{}, nil
 }
 

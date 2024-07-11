@@ -49,7 +49,7 @@ type Connector struct {
 var errMultiIA = serrors.New("different IA not allowed")
 
 // CreateIACtx creates the context for ISD-AS.
-func (c *Connector) CreateIACtx(ia addr.IA) error {
+func (c *Connector) CreateIACtx(ia addr.IA, routerID uint32) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("CreateIACtx", "isd_as", ia)
@@ -57,7 +57,7 @@ func (c *Connector) CreateIACtx(ia addr.IA) error {
 		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
 	}
 	c.ia = ia
-	return c.DataPlane.SetIA(ia)
+	return c.DataPlane.SetIA(ia, routerID)
 }
 
 // AddInternalInterface adds the internal interface.
