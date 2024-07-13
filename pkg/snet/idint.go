@@ -23,8 +23,8 @@ type IntRequest struct {
 	Encrypt bool
 	// How many AS-level hop to skip before telemetry is requested
 	SkipHops int
-	// Maximum number of AS hops data is requested from
-	MaxHops int
+	// Maximum telemetry stack length
+	MaxStackLen int
 	// Get node ID
 	ReqNodeId bool
 	// Get node count for aggregated telemetry
@@ -53,8 +53,7 @@ func (r *IntRequest) EncodeTo(intLayer *slayers.IDINT,
 	intLayer.Infrastructure = false
 	intLayer.Discard = false
 	intLayer.Encrypt = r.Encrypt
-	intLayer.MaxHopCntExceeded = false
-	intLayer.MtuExceeded = false
+	intLayer.MaxLengthExceeded = false
 	intLayer.AggregationMode = uint8(r.AggregationMode)
 
 	intLayer.Verifier = uint8(r.Verifier)
@@ -74,7 +73,7 @@ func (r *IntRequest) EncodeTo(intLayer *slayers.IDINT,
 
 	intLayer.NextHdr = nextLayer
 	intLayer.DelayHops = uint8(r.SkipHops)
-	intLayer.RemHopCnt = uint8(r.MaxHops)
+	intLayer.MaxStackLen = uint8(r.MaxStackLen / 4)
 
 	intLayer.InstructionBitmap = 0
 	if r.ReqNodeId {
@@ -136,7 +135,7 @@ func (r *IntRequest) EncodeTo(intLayer *slayers.IDINT,
 	}
 	copy(source.Mac[:], mac[:slayers.IntMacLen])
 
-	intLayer.TelemetryStack = intLayer.TelemetryStack[:0]
+	intLayer.TelemetryStack = make([]byte, source.Length())
 	n, err := source.SerializeToSlice(intLayer.TelemetryStack)
 	if err != nil {
 		return err
@@ -192,7 +191,7 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 
 	// Parse telemetry stack
 	r.stack = r.stack[:0]
-	data := r.header.TelemetryStack
+	data := intLayer.TelemetryStack
 	var entry slayers.IntStackEntry
 	for len(data) > 0 {
 		if err := entry.DecodeFromBytes(data); err != nil {
@@ -210,8 +209,7 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 // Decode the telemetry report without verifying authenticity. Fails it the report
 // contains encrypted data.
 func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
-	report.MaxHopCntExceeded = r.header.MaxHopCntExceeded
-	report.MtuExceeded = r.header.MtuExceeded
+	report.MaxLengthExceeded = r.header.MaxLengthExceeded
 	report.AggregationFunc = r.header.AggregationFunc
 	report.Instruction = r.header.Instruction
 
@@ -231,8 +229,7 @@ func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
 }
 
 func (r *RawIntReport) VerifyAndDecrypt(report *IntReport, path []addr.IA) error {
-	report.MaxHopCntExceeded = r.header.MaxHopCntExceeded
-	report.MtuExceeded = r.header.MtuExceeded
+	report.MaxLengthExceeded = r.header.MaxLengthExceeded
 	report.AggregationFunc = r.header.AggregationFunc
 	report.Instruction = r.header.Instruction
 
@@ -325,10 +322,8 @@ func decodeMetadata(entry *slayers.IntStackEntry) (TelemetryHop, error) {
 }
 
 type IntReport struct {
-	// Some metadata omitted because maximum hop count was reached.
-	MaxHopCntExceeded bool
-	// Some metadata omitted because the MTU was reached.
-	MtuExceeded bool
+	// Some metadata omitted because the maximum stack length was reached
+	MaxLengthExceeded bool
 	// IntAggrF{First|Last|Min|Max|Sum}
 	AggregationMode int
 	// Aggregation function for slot 1-4

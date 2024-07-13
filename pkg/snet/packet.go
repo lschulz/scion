@@ -585,7 +585,9 @@ func (p *Packet) Serialize() error {
 
 	// XXX(roosd): Currently, this does not take the extension headers
 	// into consideration.
-	scionLayer.PayloadLen = uint16(p.Payload.length())
+	// TODO(lschulz): PayloadLen is also calculated SerializeLayers taking all following header
+	// into account. This line can probably be removed.
+	// scionLayer.PayloadLen = uint16(p.Payload.length())
 
 	// At this point all the fields in the SCION header apart from the path
 	// and path type must be set already.
@@ -609,6 +611,10 @@ func (p *Packet) Serialize() error {
 		packetLayers = append(packetLayers, &intLayer)
 	}
 	packetLayers = append(packetLayers, p.Payload.toLayers(&scionLayer)...)
+	if p.Telemetry != nil {
+		// FIXME(lschulz): p.Payload.toLayers() sets NextHdr to UDP
+		scionLayer.NextHdr = slayers.IDINTClass
+	}
 
 	buffer := gopacket.NewSerializeBuffer()
 	options := gopacket.SerializeOptions{

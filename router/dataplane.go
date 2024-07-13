@@ -820,6 +820,7 @@ type slowPathPacketProcessor struct {
 
 	scionLayer slayers.SCION
 	hbhLayer   slayers.HopByHopExtnSkipper
+	intLayer   slayers.IdIntSkipper
 	e2eLayer   slayers.EndToEndExtnSkipper
 	lastLayer  gopacket.DecodingLayer
 	path       *scion.Raw
@@ -864,7 +865,7 @@ func (p *slowPathPacketProcessor) processPacket(pkt slowPacket) (processResult, 
 	p.srcAddr = pkt.srcAddr
 	p.rawPkt = pkt.rawPacket
 
-	p.lastLayer, err = decodeLayers(pkt.rawPacket, &p.scionLayer, &p.hbhLayer, &p.e2eLayer)
+	p.lastLayer, err = decodeLayers(pkt.rawPacket, &p.scionLayer, &p.hbhLayer, &p.intLayer, &p.e2eLayer)
 	if err != nil {
 		return processResult{}, err
 	}
@@ -1073,7 +1074,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 
 	// parse SCION header and skip extensions;
 	var err error
-	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.intLayer, &p.hbhLayer, &p.e2eLayer)
+	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.hbhLayer, &p.intLayer, &p.e2eLayer)
 	if err != nil {
 		return processResult{}, err
 	}
@@ -1084,8 +1085,13 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	}
 
 	if p.scionLayer.NextHdr == slayers.IDINTClass {
-		if err = p.processInt(res); err != nil {
+		growBy, err := p.processInt(&res)
+		if err != nil {
 			return res, err
+		}
+		if growBy > 0 {
+			newPayloadLen := p.scionLayer.PayloadLen + growBy
+			binary.BigEndian.PutUint16(p.scionLayer.Contents[6:8], newPayloadLen)
 		}
 	}
 
@@ -1121,28 +1127,28 @@ func (p *scionPacketProcessor) processPath() (processResult, error) {
 	}
 }
 
-func (p *scionPacketProcessor) processInt(res processResult) error {
+func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
+	// Determine whether we are the first and/or the last border router in this AS touching the packet
 	firstBr := res.TrafficType == ttIn || res.TrafficType == ttInTransit || res.TrafficType == ttBrTransit
-	lastBr := res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
+	var lastBr bool
+	if res.EgressID == 0 { // next hop is the destination host
+		lastBr = true
+	} else {
+		lastBr = res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
+	}
 
-	// Check delay and remaining hop count
+	// Check delay hops
 	if p.intLayer.DelayHops > 0 {
 		if lastBr {
 			p.intLayer.DelayHops--
 		}
-		return nil
-	}
-	if p.intLayer.RemHopCnt == 0 {
-		p.intLayer.MaxHopCntExceeded = true
-		return nil
-	} else if lastBr {
-		p.intLayer.RemHopCnt--
+		return 0, nil
 	}
 
 	// Parse the current top of stack
 	tos := slayers.IntStackEntry{}
 	if err := tos.DecodeFromBytes(p.intLayer.TelemetryStack); err != nil {
-		return err
+		return 0, err
 	}
 	origTosLen := tos.Length()
 
@@ -1164,7 +1170,7 @@ func (p *scionPacketProcessor) processInt(res processResult) error {
 		case slayers.IntAggrPerIntRtr: // this router is never an internal router
 			newEntry = lastBr
 		default:
-			return serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
+			return 0, serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
 		}
 	}
 	if !newEntry {
@@ -1182,17 +1188,17 @@ func (p *scionPacketProcessor) processInt(res processResult) error {
 			HopIndex: p.hopIndex,
 		}
 		if err := tos.SetMetadata(&metadata); err != nil {
-			return nil
+			return 0, nil
 		}
 	} else {
 		// Update metadata in the existing entry
 		md, err := tos.GetMetadata()
 		if err != nil {
-			return err
+			return 0, err
 		}
 		md.Merge(p.intLayer.AggregationFunc, &metadata)
 		if err := tos.SetMetadata(md); err != nil {
-			return nil
+			return 0, nil
 		}
 	}
 
@@ -1213,24 +1219,24 @@ func (p *scionPacketProcessor) processInt(res processResult) error {
 			verifIA = p.intLayer.VerifIA
 			verifHost = p.intLayer.RawVerifAddr
 		default:
-			return serrors.New("invalid ID-INT verifier", "verifier", p.intLayer.Verifier)
+			return 0, serrors.New("invalid ID-INT verifier", "verifier", p.intLayer.Verifier)
 		}
 		ip, ok := netip.AddrFromSlice(verifHost)
 		if !ok {
-			return serrors.New("invalid ID-INT verifier host address", "address", verifHost)
+			return 0, serrors.New("invalid ID-INT verifier host address", "address", verifHost)
 		}
 		var err error
 		key, err = p.drkeyProvider.GetASHostKey(time.Now(), verifIA, addr.HostIP(ip))
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if p.intLayer.Encrypt {
 			var nonce [slayers.IntNonceLen]byte
 			if _, err := rand.Read(nonce[:]); err != nil {
-				return err
+				return 0, err
 			}
 			if err := tos.Encrypt(key.Key[:], nonce[:]); err != nil {
-				return err
+				return 0, err
 			}
 		}
 	}
@@ -1250,46 +1256,62 @@ func (p *scionPacketProcessor) processInt(res processResult) error {
 			}
 		}
 	}
-	const MaxSize int = 1300 // TODO(lschulz): Determine from path MTU
-	if len(p.rawPkt)+growBy > MaxSize {
-		p.intLayer.MtuExceeded = true
+
+	var modifyStack bool
+	if p.intLayer.TrueStackLength()+growBy > (4 * int(p.intLayer.MaxStackLen)) {
+		p.intLayer.MaxLengthExceeded = true
+		modifyStack = false
+		growBy = 0
+	} else {
+		p.intLayer.StackLength += uint8(growBy / 4)
+		modifyStack = true
 	}
 
 	// Update main header in place
 	if _, err := p.intLayer.SerializeToSlice(p.intLayer.LayerContents()); err != nil {
-		return err
+		return 0, err
 	}
 
-	// Insert new entry
-	if len(p.rawPkt)+growBy <= MaxSize {
-		intLayerOffset := cap(p.rawPkt) - cap(p.intLayer.Payload)
+	// Insert or overwrite entry
+	if modifyStack {
+		intLayerOffset := cap(p.rawPkt) - cap(p.intLayer.Contents)
 		stackOffset := intLayerOffset + p.intLayer.Length() - p.intLayer.TrueStackLength()
-		p.rawPkt = append(p.rawPkt[:stackOffset], p.rawPkt[stackOffset+growBy:]...)
+
+		if growBy > 0 {
+			p.rawPkt = p.rawPkt[:len(p.rawPkt)+growBy]
+			copy(p.rawPkt[stackOffset+growBy:], p.rawPkt[stackOffset:])
+		}
+
 		newTos := p.rawPkt[stackOffset : stackOffset+tos.Length()]
 		if _, err := tos.SerializeToSlice(newTos); err != nil {
-			return err
+			return 0, err
 		}
 
 		if lastBr {
 			// at this point there must be at least two entries on the telemetry stack (source + our entry)
 			prevEntry := slayers.IntStackEntry{}
 			if err := prevEntry.DecodeFromBytes(p.rawPkt[stackOffset+tos.Length():]); err != nil {
-				return nil
+				return 0, err
 			}
 
 			// recalculate MAC in-place
 			h, err := scrypto.InitMac(key.Key[:])
 			if err != nil {
-				return err
+				return 0, err
 			}
 			tos.UpdateMacInPlace(h, newTos, prevEntry.Mac)
 		}
 	}
 
-	return nil
+	// pkt := make([]byte, hex.EncodedLen(len(p.rawPkt)))
+	// hex.Encode(pkt, p.rawPkt)
+	// fmt.Println(pkt)
+
+	res.OutPkt = p.rawPkt
+	return uint16(growBy), nil
 }
 
-func (p *scionPacketProcessor) getTelemetry(res processResult) slayers.IntMetadata {
+func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetadata {
 	md := slayers.IntMetadata{}
 
 	// Bitmap-controlled metadata
@@ -1311,6 +1333,11 @@ func (p *scionPacketProcessor) getTelemetry(res processResult) slayers.IntMetada
 	}
 
 	// Instruction-controlled metadata
+	// TODO(lschulz): Get metadata
+	// - Ingress timestamps
+	// - Interface statistics from interfaceMetrics
+	// - Process metrics from processmetrics
+	// - Ingress/egress queue statistics vie eBPF kprobes
 	for i := 0; i < 4; i++ {
 		switch p.intLayer.Instruction[i] {
 		case slayers.IntInstZero2:
@@ -1322,10 +1349,16 @@ func (p *scionPacketProcessor) getTelemetry(res processResult) slayers.IntMetada
 		case slayers.IntInstZero4:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = 0
-		case slayers.IntInstNodeIpv4Addr:
+		case slayers.IntInstQueueId:
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = uint64(0)
+			md.InstrData[i] = 0
 		case slayers.IntInstZero6:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = 0
+		case slayers.IntInstAsn:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = uint64(p.d.localIA.AS())
+		case slayers.IntInstIngressTstamp:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = 0
 		case slayers.IntInstZero8:
@@ -1466,7 +1499,7 @@ type scionPacketProcessor struct {
 	intLayer   slayers.IDINT
 	hbhLayer   slayers.HopByHopExtnSkipper
 	e2eLayer   slayers.EndToEndExtnSkipper
-	// last is the last parsed layer, i.e. either &scionLayer, &intLayer, &hbhLayer or &e2eLayer
+	// last is the last parsed layer, i.e. either &scionLayer, &hbhLayer, &intLayer or &e2eLayer
 	lastLayer gopacket.DecodingLayer
 
 	// path is the raw SCION path. Will be set during processing.
@@ -2811,6 +2844,8 @@ func decodeLayers(data []byte, base gopacket.DecodingLayer,
 func nextHdr(layer gopacket.DecodingLayer) slayers.L4ProtocolType {
 	switch v := layer.(type) {
 	case *slayers.SCION:
+		return v.NextHdr
+	case *slayers.IDINT:
 		return v.NextHdr
 	case *slayers.IdIntSkipper:
 		return v.NextHdr

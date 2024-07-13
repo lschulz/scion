@@ -33,10 +33,10 @@ const (
 )
 
 const (
-	IntBitNodeId  uint8 = 0x01
-	IntBitNodeCnt uint8 = 0x02
-	IntBitIgrIf   uint8 = 0x04
-	IntBitEgrIf   uint8 = 0x08
+	IntBitNodeId  uint8 = 0x08
+	IntBitNodeCnt uint8 = 0x04
+	IntBitIgrIf   uint8 = 0x02
+	IntBitEgrIf   uint8 = 0x01
 )
 
 // ID-INT Instructions
@@ -106,9 +106,9 @@ const IntNonceLen = 12
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// | Ver |I|D|E|X|F|Mod|Vrf|VT |VL |    Length     |    NextHdr    |
+// | Ver |I|D|E|X|R|Mod|Vrf|VT |VL |    Length     |    NextHdr    |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// | DelayHops |Res| RemHopCnt |Res| InstF | AF1 | AF2 | AF3 | AF4 |
+// | DelayHops |Res|  MaxStackLen  | InstF | AF1 | AF2 | AF3 | AF4 |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |     Inst1     |     Inst2     |     Inst3     |     Inst4     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -137,10 +137,8 @@ type IDINT struct {
 	Discard bool
 	// Encrypt telemetry
 	Encrypt bool
-	// Some metadata omitted because maximum hop count was reached.
-	MaxHopCntExceeded bool
-	// Some metadata omitted because the MTU was reached.
-	MtuExceeded bool
+	// Some metadata omitted because maximum stack size was reached.
+	MaxLengthExceeded bool
 	// Aggregation mode (range 0-3)
 	AggregationMode uint8
 	// For whom the MAC/encrypt the telemetry (range 0-3 with 3 reserved)
@@ -153,8 +151,8 @@ type IDINT struct {
 	NextHdr L4ProtocolType
 	// Number of AS-level hops to skip before telemetry is inserted (max. 63)
 	DelayHops uint8
-	// Remaining AS-level hops that can add telemetry to the stack (max. 63)
-	RemHopCnt uint8
+	// Maximum length of the telemetry stack in multiples of 4 bytes
+	MaxStackLen uint8
 	// Bitmap-encoded INT instructions (4 bit)
 	InstructionBitmap uint8
 	// Aggregation function for meatdata 1-4
@@ -197,11 +195,8 @@ func (i *IDINT) SerializeToSlice(buf []byte) (int, error) {
 	if i.Encrypt {
 		firstLine |= 1 << 26
 	}
-	if i.MaxHopCntExceeded {
+	if i.MaxLengthExceeded {
 		firstLine |= 1 << 25
-	}
-	if i.MtuExceeded {
-		firstLine |= 1 << 24
 	}
 	firstLine |= (uint32(i.AggregationMode) & 0x3) << 22
 	firstLine |= (uint32(i.Verifier) & 0x3) << 20
@@ -213,7 +208,7 @@ func (i *IDINT) SerializeToSlice(buf []byte) (int, error) {
 	// Second 4 bytes
 	var secondLine uint32
 	secondLine |= (uint32(i.DelayHops) & 0x3f) << 26
-	secondLine |= (uint32(i.RemHopCnt) & 0x3f) << 18
+	secondLine |= (uint32(i.MaxStackLen) & 0xff) << 16
 	secondLine |= (uint32(i.InstructionBitmap) & 0xf) << 12
 	secondLine |= (uint32(i.AggregationFunc[0]) & 0x7) << 9
 	secondLine |= (uint32(i.AggregationFunc[1]) & 0x7) << 6
@@ -231,7 +226,7 @@ func (i *IDINT) SerializeToSlice(buf []byte) (int, error) {
 	binary.BigEndian.PutUint64(buf[12:20], i.SourceTsPort)
 
 	// Verifier address
-	offset := CmnHdrLen
+	offset := minIntHdrLen
 	if i.Verifier == IntVerifThirdParty {
 		if err := i.SerializeVerifierAddr(buf[minIntHdrLen:]); err != nil {
 			return offset, err
@@ -288,8 +283,7 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	i.Infrastructure = ((firstLine >> 28) & 0x1) != 0
 	i.Discard = ((firstLine >> 27) & 0x1) != 0
 	i.Encrypt = ((firstLine >> 26) & 0x1) != 0
-	i.MaxHopCntExceeded = ((firstLine >> 25) & 0x1) != 0
-	i.MtuExceeded = ((firstLine >> 24) & 0x1) != 0
+	i.MaxLengthExceeded = ((firstLine >> 25) & 0x1) != 0
 	i.AggregationMode = uint8((firstLine >> 22) & 0x3)
 	i.Verifier = uint8((firstLine >> 20) & 0x3)
 	i.VerifierAddrType = AddrType((firstLine >> 16) & 0xf)
@@ -299,7 +293,7 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	// Second 4 bytes
 	secondLine := binary.BigEndian.Uint32(data[4:8])
 	i.DelayHops = uint8((secondLine >> 26) & 0x3f)
-	i.RemHopCnt = uint8((secondLine >> 18) & 0x3f)
+	i.MaxStackLen = uint8((secondLine >> 16) & 0xff)
 	i.InstructionBitmap = uint8((secondLine >> 12) & 0xf)
 	i.AggregationFunc[0] = uint8((secondLine >> 9) & 0x7)
 	i.AggregationFunc[1] = uint8((secondLine >> 6) & 0x7)
@@ -316,7 +310,7 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	i.SourceTsPort = binary.BigEndian.Uint64(data[12:20])
 
 	// Verifier address
-	offset := CmnHdrLen
+	offset := minIntHdrLen
 	if i.Verifier == IntVerifThirdParty {
 		if err := i.DecodeVerifierAddr(data[minIntHdrLen:]); err != nil {
 			df.SetTruncated()
@@ -332,7 +326,11 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 		return serrors.New("invalid ID-INT header, telemetry truncated",
 			"stackLen", stackLen, "actual", len(data)-offset)
 	}
-	i.TelemetryStack = data[offset:stackLen]
+	i.TelemetryStack = data[offset : offset+stackLen]
+	offset += stackLen
+
+	i.Contents = data[:offset]
+	i.Payload = data[offset:]
 
 	return nil
 }
@@ -342,7 +340,11 @@ func (i *IDINT) Length() int {
 }
 
 func (i *IDINT) VerifierAddrLen() int {
-	return addr.IABytes + i.VerifierAddrType.Length()
+	if i.Verifier == IntVerifThirdParty {
+		return addr.IABytes + i.VerifierAddrType.Length()
+	} else {
+		return 0
+	}
 }
 
 func (i *IDINT) TrueStackLength() int {
@@ -448,6 +450,7 @@ func (m *IntStackEntry) Length() int {
 	for _, x := range m.MetadataLength {
 		length += decodeMdLen(x)
 	}
+	length += (length % 4) // padding
 	return length
 }
 
@@ -487,8 +490,8 @@ func (m *IntStackEntry) SerializeToSlice(buf []byte) (int, error) {
 		offset += IntNonceLen
 	}
 
-	offset = copy(buf[offset:], m.Metadata)
-	offset = copy(buf[offset:], m.Mac[:])
+	offset += copy(buf[offset:], m.Metadata)
+	offset += copy(buf[offset:], m.Mac[:])
 
 	return offset, nil
 }
@@ -527,6 +530,10 @@ func (m *IntStackEntry) DecodeFromBytes(data []byte) error {
 
 	m.Metadata = data[offset : expectedLen-IntMacLen]
 	copy(m.Mac[:], data[expectedLen-IntMacLen:expectedLen])
+	offset += expectedLen - 4
+
+	m.Contents = data[:offset]
+	m.Payload = data[offset:]
 
 	return nil
 }
@@ -622,8 +629,8 @@ func (m *IntStackEntry) UpdateMacInPlace(h hash.Hash, buf []byte, prevMac [IntMa
 	if _, err := h.Write(buf); err != nil {
 		panic(err) // h.Write() never fails
 	}
-	mac := make([]byte, h.Size())
-	h.Sum(mac)
+	mac := make([]byte, 0, h.Size())
+	mac = h.Sum(mac)
 
 	// Write the new MAC
 	var truncMac [IntMacLen]byte
@@ -667,8 +674,8 @@ func (m *IntStackEntry) CalcMac(h hash.Hash, prevMac [IntMacLen]byte) ([]byte, e
 	if _, err := h.Write(buf[:length]); err != nil {
 		panic(err) // h.Write() never fails
 	}
-	mac := make([]byte, h.Size())
-	h.Sum(mac)
+	mac := make([]byte, 0, h.Size())
+	mac = h.Sum(mac)
 
 	return mac, nil
 }
@@ -681,7 +688,7 @@ func (m *IntStackEntry) CalcMac(h hash.Hash, prevMac [IntMacLen]byte) ([]byte, e
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // | Ver |I|D|E|0|0|Mod|Vrf|VT |VL |       0       |       0       |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-// |     0     |     0     |   0   | InstF | AF1 | AF2 | AF3 | AF4 |
+// |       0       |  MaxStackLen  | InstF | AF1 | AF2 | AF3 | AF4 |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |     Inst1     |     Inst2     |     Inst3     |     Inst4     |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -712,7 +719,8 @@ func (m *IntStackEntry) CalcSourceMac(h hash.Hash, intLayer *IDINT) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	offset, err = m.SerializeToSlice(buf[offset:])
+	length, err := m.SerializeToSlice(buf[offset:])
+	offset += length
 	if err != nil {
 		return nil, err
 	}
@@ -721,14 +729,13 @@ func (m *IntStackEntry) CalcSourceMac(h hash.Hash, intLayer *IDINT) ([]byte, err
 	buf[2] = 0
 	buf[3] = 0
 	buf[4] = 0
-	buf[5] = 0
 
 	h.Reset()
 	if _, err := h.Write(buf[:offset-IntMacLen]); err != nil {
 		panic(err) // h.Write() never fails
 	}
-	mac := make([]byte, h.Size())
-	h.Sum(mac)
+	mac := make([]byte, 0, h.Size())
+	mac = h.Sum(mac)
 	return mac, nil
 }
 
@@ -784,6 +791,7 @@ func (d *IntMetadata) Length() int {
 	for _, len := range d.InstrDataLen {
 		length += len
 	}
+	length += (length % 4) // padding
 	return length
 }
 
@@ -868,6 +876,7 @@ func (d *IntMetadata) SerializeToSlice(buf []byte) (int, error) {
 	// Instruction data
 	for i := 0; i < 4; i++ {
 		switch d.InstrDataLen[i] {
+		case 0:
 		case 2:
 			binary.BigEndian.PutUint16(buf[offset:], uint16(d.InstrData[i]))
 			offset += 2
@@ -890,7 +899,7 @@ func (d *IntMetadata) SerializeToSlice(buf []byte) (int, error) {
 	padding := offset % 4
 	if padding > 0 {
 		for i := 0; i < padding; i++ {
-			buf[offset] = 0
+			buf[offset+i] = 0
 		}
 		offset += padding
 	}
@@ -936,6 +945,7 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 	for i := 0; i < 4; i++ {
 		d.InstrDataLen[i] = decodeMdLen(entry.MetadataLength[i])
 		switch d.InstrDataLen[i] {
+		case 0:
 		case 2:
 			d.InstrData[i] = uint64(binary.BigEndian.Uint16(data[offset : offset+2]))
 			offset += 2
@@ -965,8 +975,8 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 // `110b` = 6 bytes
 // `111b` = 8 bytes
 func decodeMdLen(ml uint8) int {
-	if ml&0x4 == 1 {
-		return 2 * int(ml&0x3)
+	if ml&0x4 != 0 {
+		return 2*int(ml&0x3) + 2
 	} else {
 		return 0
 	}

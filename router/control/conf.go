@@ -117,7 +117,7 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 		return serrors.New("empty configuration")
 	}
 	// Set ISD-AS
-	if err := dp.CreateIACtx(cfg.IA, cfg.RouterID); err != nil {
+	if err := dp.CreateIACtx(cfg.IA, cfg.BR.ID); err != nil {
 		return err
 	}
 	// Set Keys
