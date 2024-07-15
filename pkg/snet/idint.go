@@ -119,7 +119,7 @@ func (r *IntRequest) EncodeTo(intLayer *slayers.IDINT,
 		if _, err := rand.Read(source.Nonce[:]); err != nil {
 			return err
 		}
-		if err := source.Encrypt(key.Key[:], source.Nonce); err != nil {
+		if err := source.Encrypt(key.Key[:], source.Nonce[:]); err != nil {
 			return err
 		}
 	}
@@ -228,14 +228,15 @@ func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
 	return nil
 }
 
-func (r *RawIntReport) VerifyAndDecrypt(report *IntReport, path []addr.IA) error {
+func (r *RawIntReport) VerifyAndDecrypt(report *IntReport) error {
 	report.MaxLengthExceeded = r.header.MaxLengthExceeded
 	report.AggregationFunc = r.header.AggregationFunc
 	report.Instruction = r.header.Instruction
 
 	// Get source timestamp
 	now := time.Now()
-	elapsed := ((r.header.SourceTsPort >> 16) - uint64(now.UnixNano()&0xffff_ffff_ffff)) & 0xffff_ffff_ffff
+	elapsed := (uint64(now.UnixNano()&0xffff_ffff_ffff) - (r.header.SourceTsPort >> 16))
+	elapsed &= 0xffff_ffff_ffff
 	ts := now.UnixNano() - int64(elapsed)
 	if elapsed > IntDataMaxAgeNano {
 		return serrors.New("metadata timestamp too far in the past", "ts", ts)
@@ -246,8 +247,8 @@ func (r *RawIntReport) VerifyAndDecrypt(report *IntReport, path []addr.IA) error
 	var mac [slayers.IntMacLen]byte
 	for i := len(r.stack) - 1; i >= 0; i-- {
 		entry := &r.stack[i]
-		var key []byte // TODO(lschulz): Get DRKey valid at source timestamp
-		if err := r.verifyAndDecryptEntry(entry, key, mac); err != nil {
+		var key [16]byte // TODO(lschulz): Get DRKey valid at source timestamp
+		if err := r.verifyAndDecryptEntry(entry, key[:], &mac); err != nil {
 			return err
 		}
 		if hop, err := decodeMetadata(entry); err != nil {
@@ -260,7 +261,7 @@ func (r *RawIntReport) VerifyAndDecrypt(report *IntReport, path []addr.IA) error
 }
 
 func (r *RawIntReport) verifyAndDecryptEntry(entry *slayers.IntStackEntry,
-	key []byte, prevMac [slayers.IntMacLen]byte) error {
+	key []byte, prevMac *[slayers.IntMacLen]byte) error {
 	h, err := scrypto.InitMac(key)
 	if err != nil {
 		return err
@@ -272,7 +273,7 @@ func (r *RawIntReport) verifyAndDecryptEntry(entry *slayers.IntStackEntry,
 			return err
 		}
 	} else {
-		mac, err = entry.CalcMac(h, prevMac)
+		mac, err = entry.CalcMac(h, *prevMac)
 		if err != nil {
 			return err
 		}

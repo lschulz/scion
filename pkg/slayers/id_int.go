@@ -423,7 +423,7 @@ type IntStackEntry struct {
 	MetadataLength [4]uint8
 
 	// Nonce for encrypted data
-	Nonce []byte
+	Nonce [IntNonceLen]byte
 	// Encoded metadata with padding to a multiple of 4 bytes
 	Metadata []byte
 	// Metadata MAC
@@ -486,7 +486,7 @@ func (m *IntStackEntry) SerializeToSlice(buf []byte) (int, error) {
 
 	offset := 4
 	if m.Encrypted {
-		copy(buf[offset:offset+IntNonceLen], m.Nonce)
+		copy(buf[offset:offset+IntNonceLen], m.Nonce[:])
 		offset += IntNonceLen
 	}
 
@@ -524,13 +524,13 @@ func (m *IntStackEntry) DecodeFromBytes(data []byte) error {
 
 	offset := 4
 	if m.Encrypted {
-		m.Nonce = data[offset : offset+IntNonceLen]
+		copy(m.Nonce[:], data[offset:offset+IntNonceLen])
 		offset += IntNonceLen
 	}
 
 	m.Metadata = data[offset : expectedLen-IntMacLen]
 	copy(m.Mac[:], data[expectedLen-IntMacLen:expectedLen])
-	offset += expectedLen - 4
+	offset += len(m.Metadata) + IntMacLen
 
 	m.Contents = data[:offset]
 	m.Payload = data[offset:]
@@ -580,7 +580,7 @@ func (e *IntStackEntry) SetMetadata(md *IntMetadata) error {
 // `key` must be 16, 24, or 32 bytes in length.
 // `nonce` is a random nonce of `IntNonceLen` bytes.
 func (m *IntStackEntry) Encrypt(key []byte, nonce []byte) error {
-	block, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(make([]byte, 16))
 	if err != nil {
 		return err
 	}
@@ -601,7 +601,7 @@ func (m *IntStackEntry) Decrypt(key []byte) error {
 		return serrors.New("attempted to decrypt cleartext metadata")
 	}
 
-	block, err := aes.NewCipher(key)
+	block, err := aes.NewCipher(make([]byte, 16))
 	if err != nil {
 		return err
 	}
