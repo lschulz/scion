@@ -34,10 +34,12 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/ipv4"
+	"google.golang.org/grpc/resolver"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
 	libepic "github.com/scionproto/scion/pkg/experimental/epic"
+	libgrpc "github.com/scionproto/scion/pkg/grpc"
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/processmetrics"
 	"github.com/scionproto/scion/pkg/private/serrors"
@@ -50,6 +52,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
 	"github.com/scionproto/scion/pkg/spao"
+	int_drkey "github.com/scionproto/scion/private/drkey"
 	"github.com/scionproto/scion/private/drkey/drkeyutil"
 	"github.com/scionproto/scion/private/topology"
 	underlayconn "github.com/scionproto/scion/private/underlay/conn"
@@ -87,6 +90,13 @@ type BatchConn interface {
 	Close() error
 }
 
+type idintKeyProvider interface {
+	GetASHostKey(validTime time.Time, dstIA addr.IA, dstAddr addr.Host) (drkey.Key, error)
+	SetDialer(dialer libgrpc.TCPDialer)
+	RunPrefetcher() error
+	CancelAll()
+}
+
 // DataPlane contains a SCION Border Router's forwarding logic. It reads packets
 // from multiple sockets, performs routing, and sends them to their destinations
 // (after updating the path, if that is needed).
@@ -112,6 +122,12 @@ type DataPlane struct {
 	dispatchedPortEnd   uint16
 
 	ExperimentalSCMPAuthentication bool
+	ExperimentalIDINT              bool
+	// keyCache KeyCache
+	// keyPrefetchKeeper Level1ARC
+	// prefetcher Prefetcher
+	// prefetcherTask *periodic.Task
+	IdintKeyProvider idintKeyProvider
 
 	// The pool that stores all the packet buffers as described in the design document. See
 	// https://github.com/scionproto/scion/blob/master/doc/dev/design/BorderRouter.rst
@@ -511,6 +527,21 @@ func (d *DataPlane) Run(ctx context.Context, cfg *RunConfig) error {
 	d.initPacketPool(cfg, processorQueueSize)
 	procQs, fwQs, slowQs := initQueues(cfg, d.interfaces, processorQueueSize)
 
+	d.IdintKeyProvider.SetDialer(libgrpc.TCPDialer{
+		SvcResolver: func(dst addr.SVC) []resolver.Address {
+			if base := dst.Base(); base != addr.SvcCS {
+				panic("Unsupported address type, implementation error?")
+			}
+			targets := []resolver.Address{}
+			if srv, ok := d.svc.Any(dst); ok {
+				targets = append(targets, resolver.Address{Addr: srv.String()})
+			}
+			return targets
+		},
+	})
+	d.IdintKeyProvider.RunPrefetcher()
+	defer d.IdintKeyProvider.CancelAll()
+
 	for ifID, conn := range d.interfaces {
 		go func(ifID uint16, conn BatchConn) {
 			defer log.HandlePanic()
@@ -755,7 +786,6 @@ func (d *DataPlane) runProcessor(id int, q <-chan packet,
 			d.returnPacketToPool(p.rawPacket)
 			metrics.DroppedPacketsBusyForwarder.Inc()
 		}
-
 	}
 }
 
@@ -1025,12 +1055,8 @@ func readUpTo(c <-chan packet, n int, needsBlocking bool, pkts []packet) int {
 
 func newPacketProcessor(d *DataPlane) *scionPacketProcessor {
 	p := &scionPacketProcessor{
-		d:      d,
-		buffer: gopacket.NewSerializeBuffer(),
-		drkeyProvider: &drkeyutil.FakeProvider{
-			EpochDuration:    drkeyutil.LoadEpochDuration(),
-			AcceptanceWindow: drkeyutil.LoadAcceptanceWindow(),
-		},
+		d:              d,
+		buffer:         gopacket.NewSerializeBuffer(),
 		mac:            d.macFactory(),
 		macInputBuffer: make([]byte, max(path.MACBufferSize, libepic.MACBufferSize)),
 	}
@@ -1145,6 +1171,40 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 		return 0, nil
 	}
 
+	// Get AS->Host DRKey
+	var key drkey.Key
+	if lastBr {
+		var verifIA addr.IA
+		var verifHost []byte
+		switch p.intLayer.Verifier {
+		case slayers.IntVerifSrc:
+			verifIA = p.scionLayer.SrcIA
+			verifHost = p.scionLayer.RawSrcAddr
+		case slayers.IntVerifDest:
+			verifIA = p.scionLayer.DstIA
+			verifHost = p.scionLayer.RawDstAddr
+		case slayers.IntVerifThirdParty:
+			verifIA = p.intLayer.VerifIA
+			verifHost = p.intLayer.RawVerifAddr
+		default:
+			return 0, serrors.New("invalid ID-INT verifier", "verifier", p.intLayer.Verifier)
+		}
+		ip, ok := netip.AddrFromSlice(verifHost)
+		if !ok {
+			return 0, serrors.New("invalid ID-INT verifier host address", "address", verifHost)
+		}
+		var err error
+		key, err = p.d.IdintKeyProvider.GetASHostKey(time.Now(), verifIA, addr.HostIP(ip))
+		if err != nil {
+			if err == int_drkey.ErrNotReady {
+				log.Debug("waiting for ID-INT key")
+				return 0, nil
+			} else {
+				return 0, err
+			}
+		}
+	}
+
 	// Parse the current top of stack
 	tos := slayers.IntStackEntry{}
 	if err := tos.DecodeFromBytes(p.intLayer.TelemetryStack); err != nil {
@@ -1167,7 +1227,7 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 			newEntry = false
 		case slayers.IntAggrPerBr:
 			newEntry = lastBr
-		case slayers.IntAggrPerIntRtr: // this router is never an internal router
+		case slayers.IntAggrPerIntRtr: // this BR can never be internal router
 			newEntry = lastBr
 		default:
 			return 0, serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
@@ -1204,40 +1264,13 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 
 	// Encrypt and calculate MAC only at the last BR before leaving the AS or
 	// delivering to the end host. We trust intra-AS links.
-	var key drkey.ASHostKey
-	if lastBr {
-		var verifIA addr.IA
-		var verifHost []byte
-		switch p.intLayer.Verifier {
-		case slayers.IntVerifSrc:
-			verifIA = p.scionLayer.SrcIA
-			verifHost = p.scionLayer.RawSrcAddr
-		case slayers.IntVerifDest:
-			verifIA = p.scionLayer.DstIA
-			verifHost = p.scionLayer.RawDstAddr
-		case slayers.IntVerifThirdParty:
-			verifIA = p.intLayer.VerifIA
-			verifHost = p.intLayer.RawVerifAddr
-		default:
-			return 0, serrors.New("invalid ID-INT verifier", "verifier", p.intLayer.Verifier)
-		}
-		ip, ok := netip.AddrFromSlice(verifHost)
-		if !ok {
-			return 0, serrors.New("invalid ID-INT verifier host address", "address", verifHost)
-		}
-		var err error
-		key, err = p.drkeyProvider.GetASHostKey(time.Now(), verifIA, addr.HostIP(ip))
-		if err != nil {
+	if lastBr && p.intLayer.Encrypt {
+		var nonce [slayers.IntNonceLen]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
 			return 0, err
 		}
-		if p.intLayer.Encrypt {
-			var nonce [slayers.IntNonceLen]byte
-			if _, err := rand.Read(nonce[:]); err != nil {
-				return 0, err
-			}
-			if err := tos.Encrypt(key.Key[:], nonce[:]); err != nil {
-				return 0, err
-			}
+		if err := tos.Encrypt(key, nonce[:]); err != nil {
+			return 0, err
 		}
 	}
 
@@ -1295,7 +1328,7 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 			}
 
 			// recalculate MAC in-place
-			h, err := scrypto.InitMac(key.Key[:])
+			h, err := scrypto.InitMac(key[:])
 			if err != nil {
 				return 0, err
 			}
@@ -1514,8 +1547,6 @@ type scionPacketProcessor struct {
 	peering bool
 	// index of the first hop field processed by this router
 	hopIndex uint8
-	// key provider for INT
-	drkeyProvider drkeyProvider
 
 	// cachedMac contains the full 16 bytes of the MAC. Will be set during processing.
 	// For a hop performing an Xover, it is the MAC corresponding to the down segment.
@@ -2788,7 +2819,6 @@ func (p *slowPathPacketProcessor) hasValidAuth(t time.Time) bool {
 	if err != nil {
 		return false
 	}
-	// TODO(lars): See this for how to get DRKey and compute CMAC
 	key, err := p.drkeyProvider.GetKeyWithinAcceptanceWindow(
 		t,
 		authOption.TimestampSN(),

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "doc.go",
         "extn.go",
+        "id_int.go",
         "l4.go",
         "layertypes.go",
         "pkt_auth.go",
@@ -13,7 +14,6 @@ go_library(
         "scmp_msg.go",
         "scmp_typecode.go",
         "udp.go",
-        "id_int.go",
     ],
     importpath = "github.com/scionproto/scion/pkg/slayers",
     visibility = ["//visibility:public"],

@@ -58,6 +58,22 @@ func (d Deriver) DeriveASHost(
 	return outKey, err
 }
 
+// DeriveASHost returns the ASHost derived key.
+// TODO(lschulz): Profile this function
+func (d Deriver) DeriveASHostFast(
+	dstHost addr.Host,
+	key drkey.Key,
+) (drkey.Key, error) {
+
+	buf := make([]byte, 32)
+	l, err := d.serializeLevel2Input(buf, drkey.AsHost, dstHost)
+	if err != nil {
+		return drkey.Key{}, serrors.WrapStr("serializing drkey level 2 input", err)
+	}
+	outKey, err := drkey.DeriveKey(buf[:l], key)
+	return outKey, err
+}
+
 // DeriveHostAS returns the HostAS derived key.
 func (p Deriver) DeriveHostAS(srcHost string, key drkey.Key) (drkey.Key, error) {
 	host, err := addr.ParseHost(srcHost)

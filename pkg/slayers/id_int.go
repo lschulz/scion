@@ -577,10 +577,9 @@ func (e *IntStackEntry) SetMetadata(md *IntMetadata) error {
 }
 
 // Encrypt the metadata of this stack entry.
-// `key` must be 16, 24, or 32 bytes in length.
 // `nonce` is a random nonce of `IntNonceLen` bytes.
-func (m *IntStackEntry) Encrypt(key []byte, nonce []byte) error {
-	block, err := aes.NewCipher(make([]byte, 16))
+func (m *IntStackEntry) Encrypt(key [16]byte, nonce []byte) error {
+	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return err
 	}
@@ -595,13 +594,12 @@ func (m *IntStackEntry) Encrypt(key []byte, nonce []byte) error {
 }
 
 // Decrypt the metadata of this stack entry using the nonce from the header.
-// `key` must be 16, 24, or 32 bytes in length.
-func (m *IntStackEntry) Decrypt(key []byte) error {
+func (m *IntStackEntry) Decrypt(key [16]byte) error {
 	if !m.Encrypted {
 		return serrors.New("attempted to decrypt cleartext metadata")
 	}
 
-	block, err := aes.NewCipher(make([]byte, 16))
+	block, err := aes.NewCipher(key[:])
 	if err != nil {
 		return err
 	}

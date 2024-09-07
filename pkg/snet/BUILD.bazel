@@ -4,8 +4,8 @@ go_library(
     name = "go_default_library",
     srcs = [
         "conn.go",
-        "interface.go",
         "idint.go",
+        "interface.go",
         "packet.go",
         "packet_conn.go",
         "path.go",
@@ -29,6 +29,7 @@ go_library(
         "//pkg/private/ctrl/path_mgmt:go_default_library",
         "//pkg/private/serrors:go_default_library",
         "//pkg/private/util:go_default_library",
+        "//pkg/proto/drkey:go_default_library",
         "//pkg/scrypto:go_default_library",
         "//pkg/slayers:go_default_library",
         "//pkg/slayers/path:go_default_library",

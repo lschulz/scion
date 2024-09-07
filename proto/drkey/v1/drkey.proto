@@ -23,6 +23,7 @@ enum Protocol{
     PROTOCOL_GENERIC_UNSPECIFIED = 0;
     // SCMP protocol
     PROTOCOL_SCMP = 1;
+    // ID-INT protocol
+    PROTOCOL_IDINT = 2;
     reserved 65536 to max; // only 16-bit values allowed
 }
-
