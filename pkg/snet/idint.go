@@ -10,12 +10,11 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
 	"github.com/scionproto/scion/pkg/private/serrors"
-	drkeypb "github.com/scionproto/scion/pkg/proto/drkey"
 	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers"
 )
 
-const IntDataMaxAgeNano = 60_0000_0000_0000
+const IntDataMaxAgeNano = 60_000_000_000
 
 type InBandTelemetry interface {
 	EncodeTo(intLayer *slayers.IDINT, nextLayer slayers.L4ProtocolType, sourcePort uint16) error
@@ -55,8 +54,11 @@ type IntRequest struct {
 	SourceKey drkey.Key
 }
 
-func (r *IntRequest) EncodeTo(intLayer *slayers.IDINT,
-	nextLayer slayers.L4ProtocolType, sourcePort uint16) error {
+func (r *IntRequest) EncodeTo(
+	intLayer *slayers.IDINT,
+	nextLayer slayers.L4ProtocolType,
+	sourcePort uint16,
+) error {
 	intLayer.Version = 0
 	intLayer.Infrastructure = false
 	intLayer.Discard = false
@@ -149,8 +151,36 @@ func (r *IntRequest) EncodeTo(intLayer *slayers.IDINT,
 	return nil
 }
 
+// Recover a request struct from an ID-INT header. Does not decode source
+// or decrypt source metadata.
 func (r *IntRequest) DecodeFrom(intLayer *slayers.IDINT) error {
-	panic("not implemented")
+	r.Encrypt = intLayer.Encrypt
+	r.SkipHops = int(intLayer.DelayHops)
+	r.MaxStackLen = 4 * int(intLayer.MaxStackLen)
+	r.ReqNodeId = (intLayer.InstructionBitmap & slayers.IntBitNodeId) != 0
+	r.ReqNodeCount = (intLayer.InstructionBitmap & slayers.IntBitNodeCnt) != 0
+	r.ReqIngressIf = (intLayer.InstructionBitmap & slayers.IntBitIgrIf) != 0
+	r.ReqEgressIf = (intLayer.InstructionBitmap & slayers.IntBitEgrIf) != 0
+	r.AggregationMode = int(intLayer.AggregationMode)
+	r.AggregationFunc = intLayer.AggregationFunc
+	r.Instruction = intLayer.Instruction
+
+	r.Verifier = int(intLayer.Verifier)
+	if r.Verifier == slayers.IntVerifThirdParty {
+		r.VerifierAddr.IA = intLayer.VerifIA
+		if intLayer.VerifierAddrType != slayers.T4Ip && intLayer.VerifierAddrType == slayers.T16Ip {
+			return serrors.New("address not valid as ID-INT verifier", "type", intLayer.VerifierAddrType)
+		}
+		if ip, ok := netip.AddrFromSlice(intLayer.RawVerifAddr); ok {
+			r.VerifierAddr.Host = addr.HostIP(ip)
+		}
+	}
+
+	r.SourceMetadata = TelemetryHop{}
+	r.SourceTS = time.Unix(0, int64(intLayer.SourceTsPort>>16))
+	r.SourceKey = drkey.Key{}
+
+	return nil
 }
 
 type RawIntReport struct {
@@ -158,38 +188,47 @@ type RawIntReport struct {
 	stack  []slayers.IntStackEntry
 }
 
+func (r *RawIntReport) RecoverRequest(request *IntRequest) error {
+	return request.DecodeFrom(&r.header)
+}
+
+func (r *RawIntReport) SerializedLength() int {
+	length := r.header.Length()
+	for i := range r.stack {
+		length += r.stack[i].Length()
+	}
+	return length
+}
+
 // Serializes the ID-INT data in its standard wire format.
-func (r *RawIntReport) SerializeToSlice(buf []byte) error {
+func (r *RawIntReport) SerializeToSlice(buf []byte) (int, error) {
 	if len(buf) < r.header.Length() {
-		return serrors.New("provided buffer is too small",
+		return 0, serrors.New("provided buffer is too small",
 			"expected", r.header.Length(), "actual", len(buf))
 	}
 
 	offset, err := r.header.SerializeToSlice(buf)
 	if err != nil {
-		return err
+		return offset, err
 	}
 
 	for i := range r.stack {
 		length, err := r.stack[i].SerializeToSlice(buf[offset:])
 		if err != nil {
-			return err
+			return offset, err
 		}
 		offset += length
 	}
 
-	return nil
+	return offset, nil
 }
 
-// Read ID-INT header from raw bytes.
+// Read ID-INT telemetry from raw bytes.
 func (r *RawIntReport) DecodeFromBytes(data []byte) error {
-	var (
-		intLayer slayers.IDINT
-		df       gopacket.DecodeFeedback
-	)
-	err := intLayer.DecodeFromBytes(data, df)
+	var intLayer slayers.IDINT
+	err := intLayer.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
 	if err != nil {
-		return serrors.WithCtx(err, "decodeFeedback", df)
+		return serrors.WithCtx(err, "decodeFeedback")
 	}
 	return r.DecodeFrom(&intLayer)
 }
@@ -405,7 +444,7 @@ func (c *KeyCache) fetchASHostKey(
 	srcIA addr.IA,
 ) (drkey.ASHostKey, error) {
 	meta := drkey.ASHostMeta{
-		ProtoId:  drkey.Protocol(drkeypb.Protocol_PROTOCOL_IDINT),
+		ProtoId:  drkey.IDINT,
 		Validity: validity,
 		SrcIA:    srcIA,
 		DstIA:    c.DstIA,
@@ -425,7 +464,7 @@ func (c *KeyCache) fetchHostHostKey(
 	srcAddr addr.Addr,
 ) (drkey.HostHostKey, error) {
 	meta := drkey.HostHostMeta{
-		ProtoId:  drkey.Protocol(drkeypb.Protocol_PROTOCOL_IDINT),
+		ProtoId:  drkey.IDINT,
 		Validity: validity,
 		SrcIA:    srcAddr.IA,
 		DstIA:    c.DstIA,
@@ -482,12 +521,14 @@ func (r *RawIntReport) VerifyAndDecrypt(
 		if err != nil {
 			return serrors.WithCtx(err, "source", entry.SourceMetadata, "hop", entry.HopIndex, "ia", ia)
 		}
+		wasEncrypted := entry.Encrypted
 		if err := r.verifyAndDecryptEntry(entry, key, &mac); err != nil {
 			return serrors.WithCtx(err, "source", entry.SourceMetadata, "hop", entry.HopIndex, "ia", ia)
 		}
 		if hop, err := decodeMetadata(entry); err != nil {
 			return serrors.WithCtx(err, "source", entry.SourceMetadata, "hop", entry.HopIndex, "ia", ia)
 		} else {
+			hop.Encrypted = wasEncrypted
 			report.Data = append(report.Data, hop)
 		}
 	}
@@ -583,6 +624,7 @@ type TelemetryHop struct {
 	Ingress    bool
 	Egress     bool
 	Aggregated bool
+	Encrypted  bool
 
 	NodeId    uint32
 	NodeCount uint16

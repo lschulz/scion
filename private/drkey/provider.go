@@ -27,7 +27,6 @@ import (
 	libgrpc "github.com/scionproto/scion/pkg/grpc"
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/serrors"
-	drkeypb "github.com/scionproto/scion/pkg/proto/drkey"
 	"github.com/scionproto/scion/private/drkey/drkeyutil"
 	"github.com/scionproto/scion/private/periodic"
 	"github.com/scionproto/scion/router/config"
@@ -217,7 +216,7 @@ func (p *Provider) fetchLevel1Key(
 		Validity: validity,
 		SrcIA:    p.localIA,
 		DstIA:    dstIA,
-		ProtoId:  drkey.Protocol(drkeypb.Protocol_PROTOCOL_IDINT),
+		ProtoId:  drkey.IDINT,
 	}
 
 	_, fetching := p.fetching[dstIA]
@@ -273,7 +272,7 @@ func (p *Provider) RefreshKeys(ctx context.Context) {
 			Validity: validity,
 			SrcIA:    p.localIA,
 			DstIA:    dstIA,
-			ProtoId:  drkey.Protocol(drkeypb.Protocol_PROTOCOL_IDINT),
+			ProtoId:  drkey.IDINT,
 		}
 		key, err := fetcher.Level1(ctx, meta)
 		if err != nil {
