@@ -155,7 +155,7 @@ func (r *IntRequest) EncodeTo(
 // or decrypt source metadata.
 func (r *IntRequest) DecodeFrom(intLayer *slayers.IDINT) error {
 	r.Encrypt = intLayer.Encrypt
-	r.SkipHops = int(intLayer.DelayHops)
+	r.SkipHops = 0
 	r.MaxStackLen = 4 * int(intLayer.MaxStackLen)
 	r.ReqNodeId = (intLayer.InstructionBitmap & slayers.IntBitNodeId) != 0
 	r.ReqNodeCount = (intLayer.InstructionBitmap & slayers.IntBitNodeCnt) != 0
@@ -189,7 +189,18 @@ type RawIntReport struct {
 }
 
 func (r *RawIntReport) RecoverRequest(request *IntRequest) error {
-	return request.DecodeFrom(&r.header)
+	if err := request.DecodeFrom(&r.header); err != nil {
+		return err
+	}
+	// Try to recover the original value of DelayHops from the first hop index
+	// in the telemetry stack.
+	for i := len(r.stack) - 1; i >= 0; i-- {
+		if !r.stack[i].SourceMetadata {
+			request.SkipHops = int(r.stack[i].HopIndex)
+			break
+		}
+	}
+	return nil
 }
 
 func (r *RawIntReport) SerializedLength() int {
@@ -228,7 +239,7 @@ func (r *RawIntReport) DecodeFromBytes(data []byte) error {
 	var intLayer slayers.IDINT
 	err := intLayer.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
 	if err != nil {
-		return serrors.WithCtx(err, "decodeFeedback")
+		return err
 	}
 	return r.DecodeFrom(&intLayer)
 }

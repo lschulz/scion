@@ -797,7 +797,7 @@ func (d *IntMetadata) Length() int {
 func (d *IntMetadata) Merge(aggrFuncs [4]uint8, other *IntMetadata) error {
 	updateNode := false
 	for i := 0; i < 4; i++ {
-		if d.InstrDataLen[i] != 0 && other.InstrData[i] != 0 {
+		if d.InstrDataLen[i] != 0 && other.InstrDataLen[i] != 0 {
 			switch aggrFuncs[i] {
 			case IntAggrFFirst:
 				// keep old value

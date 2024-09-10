@@ -1111,7 +1111,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	}
 
 	if p.scionLayer.NextHdr == slayers.IDINTClass {
-		growBy, err := p.processInt(&res)
+		growBy, err := p.processIdInt(&res)
 		if err != nil {
 			return res, err
 		}
@@ -1153,27 +1153,27 @@ func (p *scionPacketProcessor) processPath() (processResult, error) {
 	}
 }
 
-func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
+func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) {
 	// Determine whether we are the first and/or the last border router in this AS touching the packet
 	firstBr := res.TrafficType == ttIn || res.TrafficType == ttInTransit || res.TrafficType == ttBrTransit
-	var lastBr bool
-	if res.EgressID == 0 { // next hop is the destination host
-		lastBr = true
-	} else {
-		lastBr = res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
-	}
+	lastBr := (p.scionLayer.DstIA == p.d.localIA) // next hop is the destination host
+	lastBr = lastBr || res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
+	closeEntry := lastBr || (p.intLayer.AggregationMode == slayers.IntAggrUnlimited)
 
 	// Check delay hops
 	if p.intLayer.DelayHops > 0 {
 		if lastBr {
 			p.intLayer.DelayHops--
+			if _, err := p.intLayer.SerializeToSlice(p.intLayer.LayerContents()); err != nil {
+				return 0, err
+			}
 		}
 		return 0, nil
 	}
 
 	// Get AS->Host DRKey
 	var key drkey.Key
-	if lastBr {
+	if closeEntry {
 		var verifIA addr.IA
 		var verifHost []byte
 		switch p.intLayer.Verifier {
@@ -1197,6 +1197,8 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 		key, err = p.d.IdintKeyProvider.GetASHostKey(time.Now(), verifIA, addr.HostIP(ip))
 		if err != nil {
 			if err == int_drkey.ErrNotReady {
+				// TODO(lschulz): If there is already a hop entry from a sibling router, remove
+				// it from the stack again, as we can't provide a valid MAC.
 				log.Debug("waiting for ID-INT key")
 				return 0, nil
 			} else {
@@ -1233,12 +1235,8 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 			return 0, serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
 		}
 	}
-	if !newEntry {
-		if tos.HopIndex != p.hopIndex {
-			// previous sibling router did not push telemetry data, can't merge
-			newEntry = true
-		}
-	}
+	// TODO(lschulz): Don't attempt merge f previous sibling router did not push
+	// telemetry data.
 
 	if newEntry {
 		// Create a new entry
@@ -1260,11 +1258,13 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 		if err := tos.SetMetadata(md); err != nil {
 			return 0, nil
 		}
+		tos.Egress = lastBr
+		tos.Aggregated = true
 	}
 
 	// Encrypt and calculate MAC only at the last BR before leaving the AS or
 	// delivering to the end host. We trust intra-AS links.
-	if lastBr && p.intLayer.Encrypt {
+	if closeEntry && p.intLayer.Encrypt {
 		var nonce [slayers.IntNonceLen]byte
 		if _, err := rand.Read(nonce[:]); err != nil {
 			return 0, err
@@ -1320,7 +1320,7 @@ func (p *scionPacketProcessor) processInt(res *processResult) (uint16, error) {
 			return 0, err
 		}
 
-		if lastBr {
+		if closeEntry {
 			// at this point there must be at least two entries on the telemetry stack (source + our entry)
 			prevEntry := slayers.IntStackEntry{}
 			if err := prevEntry.DecodeFromBytes(p.rawPkt[stackOffset+tos.Length():]); err != nil {
