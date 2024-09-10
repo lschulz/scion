@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
@@ -97,6 +98,12 @@ type idintKeyProvider interface {
 	CancelAll()
 }
 
+type idintIfMetrics struct {
+	BytesTotal     atomic.Uint64
+	PacketsTotal   atomic.Uint64
+	PacketsDropped atomic.Uint64
+}
+
 // DataPlane contains a SCION Border Router's forwarding logic. It reads packets
 // from multiple sockets, performs routing, and sends them to their destinations
 // (after updating the path, if that is needed).
@@ -118,6 +125,8 @@ type DataPlane struct {
 	running             bool
 	Metrics             *Metrics
 	forwardingMetrics   map[uint16]interfaceMetrics
+	intIgrMetrics       map[uint16]*idintIfMetrics
+	intEgrMetrics       map[uint16]*idintIfMetrics
 	dispatchedPortStart uint16
 	dispatchedPortEnd   uint16
 
@@ -653,6 +662,7 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 	msgs := underlayconn.NewReadMessages(cfg.BatchSize)
 	numReusable := 0                     // unused buffers from previous loop
 	metrics := d.forwardingMetrics[ifID] // If receiver exists, fw metrics exist too.
+	intMetrics := d.intIgrMetrics[ifID]
 
 	enqueueForProcessing := func(pkt ipv4.Message) {
 		srcAddr := pkt.Addr.(*net.UDPAddr)
@@ -660,12 +670,15 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 		sc := classOfSize(size)
 		metrics[sc].InputPacketsTotal.Inc()
 		metrics[sc].InputBytesTotal.Add(float64(size))
+		intMetrics.PacketsTotal.Add(1)
+		intMetrics.BytesTotal.Add(uint64(size))
 
 		procID, err := computeProcID(pkt.Buffers[0], cfg.NumProcessors, hashSeed)
 		if err != nil {
 			log.Debug("Error while computing procID", "err", err)
 			d.returnPacketToPool(pkt.Buffers[0])
 			metrics[sc].DroppedPacketsInvalid.Inc()
+			intMetrics.PacketsDropped.Add(1)
 			return
 		}
 		outPkt := packet{
@@ -678,6 +691,7 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 		default:
 			d.returnPacketToPool(pkt.Buffers[0])
 			metrics[sc].DroppedPacketsBusyProcessor.Inc()
+			intMetrics.PacketsDropped.Add(1)
 		}
 	}
 
@@ -737,7 +751,7 @@ func (d *DataPlane) runProcessor(id int, q <-chan packet,
 	fwQs map[uint16]chan packet, slowQ chan<- slowPacket) {
 
 	log.Debug("Initialize processor with", "id", id)
-	processor := newPacketProcessor(d)
+	processor := newPacketProcessor(d, id)
 	for d.running {
 		p, ok := <-q
 		if !ok {
@@ -984,6 +998,7 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 	}
 
 	metrics := d.forwardingMetrics[ifID]
+	intMetrics := d.intEgrMetrics[ifID]
 
 	toWrite := 0
 	for d.running {
@@ -1005,6 +1020,11 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 		}
 
 		updateOutputMetrics(metrics, pkts[:written])
+		intMetrics.PacketsTotal.Add(1)
+		for _, p := range pkts[:written] {
+			intMetrics.PacketsTotal.Add(1)
+			intMetrics.BytesTotal.Add(uint64(len(p.rawPacket)))
+		}
 
 		for _, p := range pkts[:written] {
 			d.returnPacketToPool(p.rawPacket)
@@ -1014,6 +1034,7 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 			// Only one is dropped at this time. We'll retry the rest.
 			sc := classOfSize(len(pkts[written].rawPacket))
 			metrics[sc].DroppedPacketsInvalid.Inc()
+			intMetrics.PacketsDropped.Add(1)
 			d.returnPacketToPool(pkts[written].rawPacket)
 			toWrite -= (written + 1)
 			// Shift the leftovers to the head of the buffers.
@@ -1053,9 +1074,10 @@ func readUpTo(c <-chan packet, n int, needsBlocking bool, pkts []packet) int {
 	return i
 }
 
-func newPacketProcessor(d *DataPlane) *scionPacketProcessor {
+func newPacketProcessor(d *DataPlane, id int) *scionPacketProcessor {
 	p := &scionPacketProcessor{
 		d:              d,
+		qid:            id,
 		buffer:         gopacket.NewSerializeBuffer(),
 		mac:            d.macFactory(),
 		macInputBuffer: make([]byte, max(path.MACBufferSize, libepic.MACBufferSize)),
@@ -1162,7 +1184,7 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 
 	// Check delay hops
 	if p.intLayer.DelayHops > 0 {
-		if lastBr {
+		if closeEntry {
 			p.intLayer.DelayHops--
 			if _, err := p.intLayer.SerializeToSlice(p.intLayer.LayerContents()); err != nil {
 				return 0, err
@@ -1336,10 +1358,6 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 		}
 	}
 
-	// pkt := make([]byte, hex.EncodedLen(len(p.rawPkt)))
-	// hex.Encode(pkt, p.rawPkt)
-	// fmt.Println(pkt)
-
 	res.OutPkt = p.rawPkt
 	return uint16(growBy), nil
 }
@@ -1376,33 +1394,51 @@ func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetad
 		case slayers.IntInstZero2:
 			md.InstrDataLen[i] = 2
 			md.InstrData[i] = 0
-		case slayers.IntInstIsd:
-			md.InstrDataLen[i] = 2
-			md.InstrData[i] = uint64(p.d.localIA.ISD())
 		case slayers.IntInstZero4:
-			md.InstrDataLen[i] = 4
-			md.InstrData[i] = 0
-		case slayers.IntInstQueueId:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = 0
 		case slayers.IntInstZero6:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = 0
-		case slayers.IntInstAsn:
-			md.InstrDataLen[i] = 6
-			md.InstrData[i] = uint64(p.d.localIA.AS())
-		case slayers.IntInstIngressTstamp:
-			md.InstrDataLen[i] = 6
-			md.InstrData[i] = 0
 		case slayers.IntInstZero8:
 			md.InstrDataLen[i] = 8
 			md.InstrData[i] = 0
+
+		case slayers.IntInstAsn:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = uint64(p.d.localIA.AS())
+		case slayers.IntInstIsd:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.localIA.ISD())
+
+		case slayers.IntInstQueueId:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(p.qid)
+
+		case slayers.IntInstEgScifPktCnt:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].PacketsTotal.Load()
+		case slayers.IntInstEgScifPktDrop:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].PacketsDropped.Load()
+		case slayers.IntInstEgScifBytes:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].BytesTotal.Load()
+
+		case slayers.IntInstIgScifPktCnt:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].PacketsTotal.Load()
+		case slayers.IntInstIgScifPktDrop:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].PacketsDropped.Load()
+		case slayers.IntInstIgScifBytes:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].BytesTotal.Load()
+
 		default:
-			md.InstrDataLen[i] = 0
-			md.InstrData[i] = 0
+			// no operation
 		}
 	}
-
 	return md
 }
 
@@ -1513,7 +1549,8 @@ func (p *scionPacketProcessor) processEPIC() (processResult, error) {
 // mutable state and context information which should be reused.
 type scionPacketProcessor struct {
 	// d is a reference to the dataplane instance that initiated this processor.
-	d *DataPlane
+	d   *DataPlane
+	qid int
 	// ingressID is the interface ID this packet came in, determined from the
 	// socket.
 	ingressID uint16
@@ -2893,13 +2930,20 @@ func nextHdr(layer gopacket.DecodingLayer) slayers.L4ProtocolType {
 // forwarding.
 func (d *DataPlane) initMetrics() {
 	d.forwardingMetrics = make(map[uint16]interfaceMetrics)
+	d.intIgrMetrics = make(map[uint16]*idintIfMetrics)
+	d.intEgrMetrics = make(map[uint16]*idintIfMetrics)
 	d.forwardingMetrics[0] = newInterfaceMetrics(d.Metrics, 0, d.localIA, d.neighborIAs)
 	for id := range d.external {
 		if _, notOwned := d.internalNextHops[id]; notOwned {
 			continue
 		}
 		d.forwardingMetrics[id] = newInterfaceMetrics(d.Metrics, id, d.localIA, d.neighborIAs)
+		d.intIgrMetrics[id] = &idintIfMetrics{}
+		d.intEgrMetrics[id] = &idintIfMetrics{}
 	}
+
+	d.intIgrMetrics[0] = &idintIfMetrics{}
+	d.intEgrMetrics[0] = &idintIfMetrics{}
 
 	// Start our custom /proc/pid/stat collector to export iowait time and (in the future) other
 	// process-wide metrics that prometheus does not.

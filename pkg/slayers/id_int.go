@@ -884,7 +884,7 @@ func (d *IntMetadata) SerializeToSlice(buf []byte) (int, error) {
 		case 6:
 			var word [8]byte
 			binary.BigEndian.PutUint64(word[:], d.InstrData[i])
-			copy(buf[offset:offset+6], word[:])
+			copy(buf[offset:offset+6], word[2:])
 			offset += 6
 		case 8:
 			binary.BigEndian.PutUint64(buf[offset:], d.InstrData[i])
@@ -952,7 +952,7 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 			offset += 4
 		case 6:
 			var word [8]byte
-			copy(word[:], data[offset:offset+6])
+			copy(word[2:], data[offset:offset+6])
 			d.InstrData[i] = binary.BigEndian.Uint64(word[:])
 			offset += 6
 		case 8:
