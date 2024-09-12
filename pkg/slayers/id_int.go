@@ -1,13 +1,11 @@
 package slayers
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"encoding/binary"
-	"hash"
 
 	"github.com/google/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/fcrypto"
 	"github.com/scionproto/scion/pkg/private/serrors"
 )
 
@@ -576,41 +574,44 @@ func (e *IntStackEntry) SetMetadata(md *IntMetadata) error {
 	return nil
 }
 
-// Encrypt the metadata of this stack entry.
-// `nonce` is a random nonce of `IntNonceLen` bytes.
-func (m *IntStackEntry) Encrypt(key [16]byte, nonce []byte) error {
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return err
-	}
-	var iv [16]byte
-	copy(iv[:IntNonceLen], nonce)
-	streamCipher := cipher.NewCTR(block, iv[:])
-
-	streamCipher.XORKeyStream(m.Metadata, m.Metadata)
+// Set the nonce for encryption.
+// TODO(lschulz): SetNonce and Encrypt shouldn't be separate calls.
+func (m *IntStackEntry) SetNonce(nonce [12]byte) {
 	m.Encrypted = true
-	copy(m.Nonce[:], nonce)
+	copy(m.Nonce[:], nonce[:])
+}
+
+// Encrypt the metadata and MAC of this stack entry using the nonce from the
+// header.
+func (m *IntStackEntry) Encrypt(key [16]byte) error {
+	if !m.Encrypted {
+		return serrors.New("nonce not set")
+	}
+	m.encdecImpl(key)
 	return nil
 }
 
-// Decrypt the metadata of this stack entry using the nonce from the header.
+// Decrypt the metadata and MAC of this stack entry using the nonce from the
+// header.
 func (m *IntStackEntry) Decrypt(key [16]byte) error {
 	if !m.Encrypted {
 		return serrors.New("attempted to decrypt cleartext metadata")
 	}
-
-	block, err := aes.NewCipher(key[:])
-	if err != nil {
-		return err
-	}
-
-	var iv [16]byte
-	copy(iv[:IntNonceLen], m.Nonce[:])
-	streamCipher := cipher.NewCTR(block, iv[:])
-
-	streamCipher.XORKeyStream(m.Metadata, m.Metadata)
-	m.Encrypted = false
+	m.encdecImpl(key)
 	return nil
+}
+
+// Remove the nonce for encryption.
+// TODO(lschulz): RemoveNonce and Decrypt shouldn't be separate calls.
+func (m *IntStackEntry) RemoveNonce() {
+	m.Encrypted = false
+}
+
+func (m *IntStackEntry) encdecImpl(key [16]byte) {
+	data := append(m.Metadata, m.Mac[:]...)
+	fcrypto.AESCTR(key, m.Nonce, data)
+	m.Metadata = data[:IntMacLen]
+	copy(m.Mac[:], m.Metadata[len(m.Metadata):])
 }
 
 // Calculate and update the MAC of this stack entry.
@@ -618,17 +619,11 @@ func (m *IntStackEntry) Decrypt(key [16]byte) error {
 // `prevHopMac` is the MAC of the previous entry for chaining.
 // Returns a tuple of the old MAC and the newly calculated MAC. The new MAC
 // is written to the buffer, overwriting the old before the function returns.
-func (m *IntStackEntry) UpdateMacInPlace(h hash.Hash, buf []byte, prevMac [IntMacLen]byte) (
+func (m *IntStackEntry) UpdateMacInPlace(key [16]byte, buf []byte, prevMac [IntMacLen]byte) (
 	[IntMacLen]byte, [IntMacLen]byte) {
 	// Overwrite MAC with MAC of the previous hop before calculating the new MAC
 	copy(buf[len(buf)-IntMacLen:], prevMac[:IntMacLen])
-
-	h.Reset()
-	if _, err := h.Write(buf); err != nil {
-		panic(err) // h.Write() never fails
-	}
-	mac := make([]byte, 0, h.Size())
-	mac = h.Sum(mac)
+	mac := fcrypto.CBCMAC(key, buf)
 
 	// Write the new MAC
 	var truncMac [IntMacLen]byte
@@ -659,22 +654,16 @@ func (m *IntStackEntry) UpdateMacInPlace(h hash.Hash, buf []byte, prevMac [IntMa
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |                    MAC of the previous hop                    |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-func (m *IntStackEntry) CalcMac(h hash.Hash, prevMac [IntMacLen]byte) ([]byte, error) {
+func (m *IntStackEntry) CalcMac(key [16]byte, prevMac [IntMacLen]byte) ([16]byte, error) {
 	var buf [64]byte
 
 	length, err := m.SerializeToSlice(buf[:])
 	if err != nil {
-		return nil, err
+		return [16]byte{}, err
 	}
 	copy(buf[length-IntMacLen:], prevMac[:IntMacLen])
 
-	h.Reset()
-	if _, err := h.Write(buf[:length]); err != nil {
-		panic(err) // h.Write() never fails
-	}
-	mac := make([]byte, 0, h.Size())
-	mac = h.Sum(mac)
-
+	mac := fcrypto.CBCMAC(key, buf[:length])
 	return mac, nil
 }
 
@@ -710,17 +699,17 @@ func (m *IntStackEntry) CalcMac(h hash.Hash, prevMac [IntMacLen]byte) ([]byte, e
 // |                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |                               |  Padding to a multiple of 4B  |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-func (m *IntStackEntry) CalcSourceMac(h hash.Hash, intLayer *IDINT) ([]byte, error) {
+func (m *IntStackEntry) CalcSourceMac(key [16]byte, intLayer *IDINT) ([16]byte, error) {
 	// Serialize main header and source stack entry
 	buf := make([]byte, 128)
 	offset, err := intLayer.SerializeToSlice(buf)
 	if err != nil {
-		return nil, err
+		return [16]byte{}, err
 	}
 	length, err := m.SerializeToSlice(buf[offset:])
 	offset += length
 	if err != nil {
-		return nil, err
+		return [16]byte{}, err
 	}
 
 	// Zero-out updateable fields
@@ -728,12 +717,7 @@ func (m *IntStackEntry) CalcSourceMac(h hash.Hash, intLayer *IDINT) ([]byte, err
 	buf[3] = 0
 	buf[4] = 0
 
-	h.Reset()
-	if _, err := h.Write(buf[:offset-IntMacLen]); err != nil {
-		panic(err) // h.Write() never fails
-	}
-	mac := make([]byte, 0, h.Size())
-	mac = h.Sum(mac)
+	mac := fcrypto.CBCMAC(key, buf[:offset-IntMacLen])
 	return mac, nil
 }
 

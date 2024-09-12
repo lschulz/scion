@@ -40,6 +40,7 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
 	libepic "github.com/scionproto/scion/pkg/experimental/epic"
+	"github.com/scionproto/scion/pkg/fcrypto"
 	libgrpc "github.com/scionproto/scion/pkg/grpc"
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/processmetrics"
@@ -1180,6 +1181,9 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 	firstBr := res.TrafficType == ttIn || res.TrafficType == ttInTransit || res.TrafficType == ttBrTransit
 	lastBr := (p.scionLayer.DstIA == p.d.localIA) // next hop is the destination host
 	lastBr = lastBr || res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
+
+	// Calculate MAC and encrypt only at the last BR before leaving the AS or
+	// delivering to the end host. We trust intra-AS links.
 	closeEntry := lastBr || (p.intLayer.AggregationMode == slayers.IntAggrUnlimited)
 
 	// Check delay hops
@@ -1257,14 +1261,14 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 			return 0, serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
 		}
 	}
-	// TODO(lschulz): Don't attempt merge f previous sibling router did not push
+	// TODO(lschulz): Don't attempt merge if previous sibling router did not push
 	// telemetry data.
 
 	if newEntry {
 		// Create a new entry
 		tos = slayers.IntStackEntry{
-			Ingress:  res.TrafficType == ttIn || res.TrafficType == ttInTransit,
-			Egress:   res.TrafficType == ttOut || res.TrafficType == ttOutTransit,
+			Ingress:  firstBr,
+			Egress:   (res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit),
 			HopIndex: p.hopIndex,
 		}
 		if err := tos.SetMetadata(&metadata); err != nil {
@@ -1284,16 +1288,11 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 		tos.Aggregated = true
 	}
 
-	// Encrypt and calculate MAC only at the last BR before leaving the AS or
-	// delivering to the end host. We trust intra-AS links.
 	if closeEntry && p.intLayer.Encrypt {
 		var nonce [slayers.IntNonceLen]byte
-		if _, err := rand.Read(nonce[:]); err != nil {
-			return 0, err
-		}
-		if err := tos.Encrypt(key, nonce[:]); err != nil {
-			return 0, err
-		}
+		binary.NativeEndian.PutUint64(nonce[:8], fcrypto.RandUInt64())
+		binary.NativeEndian.PutUint32(nonce[8:], fcrypto.RandUInt32())
+		tos.SetNonce(nonce)
 	}
 
 	var growBy int
@@ -1349,12 +1348,13 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 				return 0, err
 			}
 
-			// recalculate MAC in-place
-			h, err := scrypto.InitMac(key[:])
-			if err != nil {
-				return 0, err
+			// MAC and optionally encrypt
+			tos.UpdateMacInPlace(key, newTos, prevEntry.Mac)
+			if p.intLayer.Encrypt {
+				if err := tos.Encrypt(key); err != nil {
+					return 0, err
+				}
 			}
-			tos.UpdateMacInPlace(h, newTos, prevEntry.Mac)
 		}
 	}
 

@@ -19,6 +19,7 @@ import (
 	"crypto/cipher"
 
 	"github.com/scionproto/scion/pkg/addr"
+	"github.com/scionproto/scion/pkg/fcrypto"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/slayers"
 )
@@ -68,14 +69,7 @@ func SerializeHostHostInput(input []byte, host addr.Host) (int, error) {
 // https://docs.scion.org/en/latest/cryptography/drkey.html#prf-derivation-specification
 // The input buffer is overwritten.
 func DeriveKey(input []byte, upperLevelKey Key) (Key, error) {
-	var key Key
-	b, err := initAESCBC(upperLevelKey[:])
-	if err != nil {
-		return key, err
-	}
-	mac := cbcMac(b, input[:])
-	copy(key[:], mac)
-	return key, nil
+	return fcrypto.CBCMAC(upperLevelKey, input), nil
 }
 
 func initAESCBC(key []byte) (cipher.BlockMode, error) {

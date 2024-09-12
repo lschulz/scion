@@ -2,15 +2,15 @@ package snet
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/binary"
 	"net/netip"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
+	"github.com/scionproto/scion/pkg/fcrypto"
 	"github.com/scionproto/scion/pkg/private/serrors"
-	"github.com/scionproto/scion/pkg/scrypto"
 	"github.com/scionproto/scion/pkg/slayers"
 )
 
@@ -122,24 +122,24 @@ func (r *IntRequest) EncodeTo(
 	}
 
 	if r.Encrypt {
-		if _, err := rand.Read(source.Nonce[:]); err != nil {
-			return err
-		}
-		if err := source.Encrypt(r.SourceKey, source.Nonce[:]); err != nil {
-			return err
-		}
+		var nonce [slayers.IntNonceLen]byte
+		binary.NativeEndian.PutUint64(nonce[:8], fcrypto.RandUInt64())
+		binary.NativeEndian.PutUint32(nonce[8:], fcrypto.RandUInt32())
+		source.SetNonce(nonce)
 	}
 
 	intLayer.SourceTsPort = (uint64(r.SourceTS.UnixNano()) << 16) | uint64(sourcePort)
-	h, err := scrypto.InitMac(r.SourceKey[:])
-	if err != nil {
-		return err
-	}
-	mac, err := source.CalcSourceMac(h, intLayer)
+	mac, err := source.CalcSourceMac(r.SourceKey, intLayer)
 	if err != nil {
 		return err
 	}
 	copy(source.Mac[:], mac[:slayers.IntMacLen])
+
+	if r.Encrypt {
+		if err := source.Encrypt(r.SourceKey); err != nil {
+			return err
+		}
+	}
 
 	intLayer.TelemetryStack = make([]byte, source.Length())
 	n, err := source.SerializeToSlice(intLayer.TelemetryStack)
@@ -551,18 +551,23 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 	key drkey.Key,
 	prevMac *[slayers.IntMacLen]byte,
 ) error {
-	h, err := scrypto.InitMac(key[:])
-	if err != nil {
-		return err
+	var mac [16]byte
+	var err error
+
+	if entry.Encrypted {
+		if err := entry.Decrypt(key); err != nil {
+			return err
+		}
+		defer entry.RemoveNonce()
 	}
-	var mac []byte
+
 	if entry.SourceMetadata {
-		mac, err = entry.CalcSourceMac(h, &r.header)
+		mac, err = entry.CalcSourceMac(key, &r.header)
 		if err != nil {
 			return err
 		}
 	} else {
-		mac, err = entry.CalcMac(h, *prevMac)
+		mac, err = entry.CalcMac(key, *prevMac)
 		if err != nil {
 			return err
 		}
@@ -572,11 +577,7 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 			"expected", mac[:slayers.IntMacLen], "actual", entry.Mac[:])
 	}
 	copy(prevMac[:], mac[:slayers.IntMacLen])
-	if entry.Encrypted {
-		if err := entry.Decrypt(key); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 

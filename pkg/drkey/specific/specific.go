@@ -59,7 +59,6 @@ func (d Deriver) DeriveASHost(
 }
 
 // DeriveASHost returns the ASHost derived key.
-// TODO(lschulz): Profile this function
 func (d Deriver) DeriveASHostFast(
 	dstHost addr.Host,
 	key drkey.Key,
