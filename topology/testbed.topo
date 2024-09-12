@@ -1,0 +1,16 @@
+---
+ASes:
+  "16-0:0:fc00":
+    core: true
+    voting: true
+    authoritative: true
+    issuing: true
+    underlay: UDP/IPv6
+  "16-0:0:fc01":
+    core: true
+    voting: true
+    authoritative: true
+    issuing: true
+    underlay: UDP/IPv6
+links:
+  - {a: "16-0:0:fc00#1", b: "16-0:0:fc01#1", linkAtoB: CORE, underlay: UDP/IPv6}

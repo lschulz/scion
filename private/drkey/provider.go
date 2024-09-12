@@ -39,14 +39,12 @@ const (
 )
 
 type cachedKey struct {
-	lastAccess time.Time
-	key        [2]drkey.Level1Key
+	key [2]drkey.Level1Key
 }
 
 func (c *cachedKey) getValidKey(validity time.Time) (drkey.Level1Key, bool) {
 	for i := 0; i < 2; i++ {
 		if c.key[i].Epoch.Contains(validity) {
-			c.lastAccess = time.Now()
 			return c.key[i], true
 		}
 	}

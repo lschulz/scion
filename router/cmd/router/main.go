@@ -51,6 +51,15 @@ func main() {
 }
 
 func realMain(ctx context.Context) error {
+	// if globalCfg.General.CpuProfile != "" {
+	// 	f, err := os.Create(globalCfg.General.CpuProfile)
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+	// 	pprof.StartCPUProfile(f)
+	// 	defer pprof.StopCPUProfile()
+	// }
+
 	controlConfig, err := loadControlConfig()
 	if err != nil {
 		return err
