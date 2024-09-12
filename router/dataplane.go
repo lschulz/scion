@@ -40,7 +40,6 @@ import (
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
 	libepic "github.com/scionproto/scion/pkg/experimental/epic"
-	"github.com/scionproto/scion/pkg/fcrypto"
 	libgrpc "github.com/scionproto/scion/pkg/grpc"
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/processmetrics"
@@ -1290,8 +1289,10 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 
 	if closeEntry && p.intLayer.Encrypt {
 		var nonce [slayers.IntNonceLen]byte
-		binary.NativeEndian.PutUint64(nonce[:8], fcrypto.RandUInt64())
-		binary.NativeEndian.PutUint32(nonce[8:], fcrypto.RandUInt32())
+		_, err := rand.Read(nonce[:])
+		if err != nil {
+			return 0, err
+		}
 		tos.SetNonce(nonce)
 	}
 

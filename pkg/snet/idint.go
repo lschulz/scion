@@ -2,14 +2,13 @@ package snet
 
 import (
 	"context"
-	"encoding/binary"
+	"crypto/rand"
 	"net/netip"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
-	"github.com/scionproto/scion/pkg/fcrypto"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/slayers"
 )
@@ -123,8 +122,10 @@ func (r *IntRequest) EncodeTo(
 
 	if r.Encrypt {
 		var nonce [slayers.IntNonceLen]byte
-		binary.NativeEndian.PutUint64(nonce[:8], fcrypto.RandUInt64())
-		binary.NativeEndian.PutUint32(nonce[8:], fcrypto.RandUInt32())
+		_, err := rand.Read(nonce[:])
+		if err != nil {
+			return err
+		}
 		source.SetNonce(nonce)
 	}
 
