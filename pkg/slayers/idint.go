@@ -574,65 +574,128 @@ func (e *IntStackEntry) SetMetadata(md *IntMetadata) error {
 	return nil
 }
 
-// Set the nonce for encryption.
-// TODO(lschulz): SetNonce and Encrypt shouldn't be separate calls.
-func (m *IntStackEntry) SetNonce(nonce [12]byte) {
-	m.Encrypted = true
-	copy(m.Nonce[:], nonce[:])
-}
+// Serialize to slice with a newly calculated MAC. The IntStackEntry instance
+// itself is not changed. This function calculates the MAC directly on the
+// destination buffer avoiding a temporary buffer for calculating the MAC.
+func (m *IntStackEntry) SerializeToSliceMac(
+	buf []byte,
+	prevMac [IntMacLen]byte,
+	key [16]byte,
+) (int, error) {
 
-// Encrypt the metadata and MAC of this stack entry using the nonce from the
-// header.
-func (m *IntStackEntry) Encrypt(key [16]byte) error {
-	if !m.Encrypted {
-		return serrors.New("nonce not set")
+	offset, err := m.SerializeToSlice(buf)
+	if err != nil {
+		return offset, err
 	}
-	m.encdecImpl(key)
-	return nil
-}
 
-// Decrypt the metadata and MAC of this stack entry using the nonce from the
-// header.
-func (m *IntStackEntry) Decrypt(key [16]byte) error {
-	if !m.Encrypted {
-		return serrors.New("attempted to decrypt cleartext metadata")
-	}
-	m.encdecImpl(key)
-	return nil
-}
-
-// Remove the nonce for encryption.
-// TODO(lschulz): RemoveNonce and Decrypt shouldn't be separate calls.
-func (m *IntStackEntry) RemoveNonce() {
-	m.Encrypted = false
-}
-
-func (m *IntStackEntry) encdecImpl(key [16]byte) {
-	data := append(m.Metadata, m.Mac[:]...)
-	fcrypto.AESCTR(key, m.Nonce, data)
-	m.Metadata = data[:IntMacLen]
-	copy(m.Mac[:], m.Metadata[len(m.Metadata):])
-}
-
-// Calculate and update the MAC of this stack entry.
-// `buf` must contain the stack entry serialized by calling `SerializeTo(buf)`.
-// `prevHopMac` is the MAC of the previous entry for chaining.
-// Returns a tuple of the old MAC and the newly calculated MAC. The new MAC
-// is written to the buffer, overwriting the old before the function returns.
-func (m *IntStackEntry) UpdateMacInPlace(key [16]byte, buf []byte, prevMac [IntMacLen]byte) (
-	[IntMacLen]byte, [IntMacLen]byte) {
 	// Overwrite MAC with MAC of the previous hop before calculating the new MAC
-	copy(buf[len(buf)-IntMacLen:], prevMac[:IntMacLen])
+	copy(buf[offset-IntMacLen:], prevMac[:IntMacLen])
 	mac := fcrypto.CBCMAC(key, buf)
 
 	// Write the new MAC
-	var truncMac [IntMacLen]byte
-	copy(truncMac[:], mac[:IntMacLen])
-	copy(buf[len(buf)-IntMacLen:], truncMac[:])
+	copy(buf[offset-IntMacLen:], mac[:IntMacLen])
 
-	oldMac := m.Mac
-	m.Mac = truncMac
-	return oldMac, truncMac
+	return offset, err
+}
+
+// Serialize to slice with a newly calculated MAC and encrypt the telemetry data
+// in the buffer. The IntStackEntry instance itself is not changed. This
+// function calculates the MAC directly on the destination buffer avoiding a
+// temporary buffer for calculating the MAC.
+func (m *IntStackEntry) SerializeToSliceEncrypt(
+	buf []byte,
+	prevMac [IntMacLen]byte,
+	key [16]byte,
+	nonce [12]byte,
+) (int, error) {
+
+	copy(m.Nonce[:], nonce[:])
+	offset, err := m.SerializeToSliceMac(buf, prevMac, key)
+	if err != nil {
+		return offset, err
+	}
+
+	// Encrypt
+	const metadataOffset = 4 + IntNonceLen
+	fcrypto.AESCTR(key, m.Nonce, buf[metadataOffset:offset-IntMacLen])
+
+	return offset, nil
+}
+
+// Update the MAC of a source telemetry entry.
+// intLayer provides additional fields from the ID-INT main header for MACing.
+func (m *IntStackEntry) AuthSource(
+	key [16]byte,
+	intLayer *IDINT,
+) ([IntMacLen]byte, error) {
+
+	mac, err := m.calcSourceMac(key, intLayer)
+	if err != nil {
+		return [IntMacLen]byte{}, err
+	}
+	copy(m.Mac[:], mac[:])
+
+	return mac, nil
+}
+
+// Authenticate and encrypt a source telemetry entry.
+// nonce is set as the entries nonce.
+// intLayer provides additional fields from the ID-INT main header for MACing.
+func (m *IntStackEntry) EncryptSource(
+	key [16]byte,
+	nonce [IntNonceLen]byte,
+	intLayer *IDINT,
+) ([IntMacLen]byte, error) {
+
+	m.Encrypted = true
+	copy(m.Nonce[:], nonce[:])
+
+	mac, err := m.calcSourceMac(key, intLayer)
+	if err != nil {
+		return [IntMacLen]byte{}, err
+	}
+	copy(m.Mac[:], mac[:])
+	m.encdecImpl(key)
+
+	return mac, nil
+}
+
+// Decrypts the metadata and MAC of a source stack entry using the nonce from
+// the header. Calculates and returns the expected nonce. Comapre to the nonce
+// in the header to validate telemetry integrity.
+func (m *IntStackEntry) DecryptSource(key [16]byte, intLayer *IDINT) ([IntMacLen]byte, error) {
+	if m.Encrypted {
+		m.encdecImpl(key)
+	}
+	mac, err := m.calcSourceMac(key, intLayer)
+	m.Encrypted = false // set this after calcSourceMac so nonce is still included in MAC
+	if err != nil {
+		return [IntMacLen]byte{}, err
+	}
+	return mac, nil
+}
+
+// Decrypts the metadata and MAC of this stack entry using the nonce from the
+// header. Calculates and returns the expected nonce. Comapre to the nonce in
+// the header to validate telemetry integrity.
+func (m *IntStackEntry) Decrypt(key [16]byte, prevMac [IntMacLen]byte) ([IntMacLen]byte, error) {
+	if m.Encrypted {
+		m.encdecImpl(key)
+	}
+	mac, err := m.calcMac(key, prevMac)
+	m.Encrypted = false // set this after calcSourceMac so nonce is still included in MAC
+	if err != nil {
+		return [IntMacLen]byte{}, err
+	}
+	return mac, nil
+}
+
+func (m *IntStackEntry) encdecImpl(key [16]byte) {
+	// AES-CCM requires encrypting the MAC as well
+	data := append(m.Metadata, m.Mac[:]...)
+	fcrypto.AESCTR(key, m.Nonce, data)
+	m.Metadata = data[:len(m.Metadata)]
+	copy(m.Mac[:], m.Metadata[len(data)-IntMacLen:])
 }
 
 // Calculate telemetry MAC.
@@ -654,17 +717,20 @@ func (m *IntStackEntry) UpdateMacInPlace(key [16]byte, buf []byte, prevMac [IntM
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |                    MAC of the previous hop                    |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-func (m *IntStackEntry) CalcMac(key [16]byte, prevMac [IntMacLen]byte) ([16]byte, error) {
+func (m *IntStackEntry) calcMac(key [16]byte, prevMac [IntMacLen]byte) ([IntMacLen]byte, error) {
 	var buf [64]byte
 
 	length, err := m.SerializeToSlice(buf[:])
 	if err != nil {
-		return [16]byte{}, err
+		return [IntMacLen]byte{}, err
 	}
 	copy(buf[length-IntMacLen:], prevMac[:IntMacLen])
 
 	mac := fcrypto.CBCMAC(key, buf[:length])
-	return mac, nil
+
+	var truncMac [IntMacLen]byte
+	copy(truncMac[:], mac[:IntMacLen])
+	return truncMac, nil
 }
 
 // Calculates and returns the MAC for the INT source entry on the telemetry stack.
@@ -699,17 +765,17 @@ func (m *IntStackEntry) CalcMac(key [16]byte, prevMac [IntMacLen]byte) ([16]byte
 // |                               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |                               |  Padding to a multiple of 4B  |
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-func (m *IntStackEntry) CalcSourceMac(key [16]byte, intLayer *IDINT) ([16]byte, error) {
+func (m *IntStackEntry) calcSourceMac(key [16]byte, intLayer *IDINT) ([IntMacLen]byte, error) {
 	// Serialize main header and source stack entry
 	buf := make([]byte, 128)
 	offset, err := intLayer.SerializeToSlice(buf)
 	if err != nil {
-		return [16]byte{}, err
+		return [IntMacLen]byte{}, err
 	}
 	length, err := m.SerializeToSlice(buf[offset:])
 	offset += length
 	if err != nil {
-		return [16]byte{}, err
+		return [IntMacLen]byte{}, err
 	}
 
 	// Zero-out updateable fields
@@ -718,19 +784,10 @@ func (m *IntStackEntry) CalcSourceMac(key [16]byte, intLayer *IDINT) ([16]byte, 
 	buf[4] = 0
 
 	mac := fcrypto.CBCMAC(key, buf[:offset-IntMacLen])
-	return mac, nil
-}
 
-func CompareMACs(a []byte, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	var truncMac [IntMacLen]byte
+	copy(truncMac[:], mac[:IntMacLen])
+	return truncMac, nil
 }
 
 // Decoded metadata from an ID-INT stack entry

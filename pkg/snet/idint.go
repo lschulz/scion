@@ -2,7 +2,6 @@ package snet
 
 import (
 	"context"
-	"crypto/rand"
 	"net/netip"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/scionproto/scion/pkg/drkey"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/slayers"
+	"lukechampine.com/frand"
 )
 
 const IntDataMaxAgeNano = 60_000_000_000
@@ -119,27 +119,14 @@ func (r *IntRequest) EncodeTo(
 	if err := source.SetMetadata(&sourceData); err != nil {
 		return err
 	}
-
-	if r.Encrypt {
-		var nonce [slayers.IntNonceLen]byte
-		_, err := rand.Read(nonce[:])
-		if err != nil {
-			return err
-		}
-		source.SetNonce(nonce)
-	}
-
 	intLayer.SourceTsPort = (uint64(r.SourceTS.UnixNano()) << 16) | uint64(sourcePort)
-	mac, err := source.CalcSourceMac(r.SourceKey, intLayer)
-	if err != nil {
-		return err
-	}
-	copy(source.Mac[:], mac[:slayers.IntMacLen])
 
-	if r.Encrypt {
-		if err := source.Encrypt(r.SourceKey); err != nil {
-			return err
-		}
+	if !r.Encrypt {
+		source.AuthSource(r.SourceKey, intLayer)
+	} else {
+		var nonce [slayers.IntNonceLen]byte
+		frand.Read(nonce[:])
+		source.EncryptSource(r.SourceKey, nonce, intLayer)
 	}
 
 	intLayer.TelemetryStack = make([]byte, source.Length())
@@ -552,34 +539,39 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 	key drkey.Key,
 	prevMac *[slayers.IntMacLen]byte,
 ) error {
-	var mac [16]byte
+	var mac [slayers.IntMacLen]byte
 	var err error
 
-	if entry.Encrypted {
-		if err := entry.Decrypt(key); err != nil {
-			return err
-		}
-		defer entry.RemoveNonce()
-	}
-
 	if entry.SourceMetadata {
-		mac, err = entry.CalcSourceMac(key, &r.header)
+		mac, err = entry.DecryptSource(key, &r.header)
 		if err != nil {
 			return err
 		}
 	} else {
-		mac, err = entry.CalcMac(key, *prevMac)
+		mac, err = entry.Decrypt(key, *prevMac)
 		if err != nil {
 			return err
 		}
 	}
-	if !slayers.CompareMACs(entry.Mac[:], mac[:slayers.IntMacLen]) {
+	if !CompareMACs(entry.Mac[:], mac[:slayers.IntMacLen]) {
 		return serrors.New("telemetry MAC verification failed",
-			"expected", mac[:slayers.IntMacLen], "actual", entry.Mac[:])
+			"expected", mac, "actual", entry.Mac[:])
 	}
-	copy(prevMac[:], mac[:slayers.IntMacLen])
+	copy(prevMac[:], mac[:])
 
 	return nil
+}
+
+func CompareMACs(a []byte, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeMetadata(entry *slayers.IntStackEntry) (TelemetryHop, error) {

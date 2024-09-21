@@ -5,7 +5,7 @@ go_library(
     srcs = [
         "doc.go",
         "extn.go",
-        "id_int.go",
+        "idint.go",
         "l4.go",
         "layertypes.go",
         "pkt_auth.go",

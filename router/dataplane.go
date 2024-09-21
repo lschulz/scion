@@ -36,6 +36,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/ipv4"
 	"google.golang.org/grpc/resolver"
+	"lukechampine.com/frand"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
@@ -1287,16 +1288,8 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 		tos.Aggregated = true
 	}
 
-	if closeEntry && p.intLayer.Encrypt {
-		var nonce [slayers.IntNonceLen]byte
-		_, err := rand.Read(nonce[:])
-		if err != nil {
-			return 0, err
-		}
-		tos.SetNonce(nonce)
-	}
-
 	var growBy int
+	tos.Encrypted = closeEntry && p.intLayer.Encrypt
 	if newEntry {
 		growBy = tos.Length()
 	} else {
@@ -1338,21 +1331,25 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 		}
 
 		newTos := p.rawPkt[stackOffset : stackOffset+tos.Length()]
-		if _, err := tos.SerializeToSlice(newTos); err != nil {
-			return 0, err
-		}
-
-		if closeEntry {
-			// at this point there must be at least two entries on the telemetry stack (source + our entry)
+		if !closeEntry {
+			if _, err := tos.SerializeToSlice(newTos); err != nil {
+				return 0, err
+			}
+		} else {
+			// at this point there must be at least two entries on the telemetry
+			// stack (source + current entry)
 			prevEntry := slayers.IntStackEntry{}
 			if err := prevEntry.DecodeFromBytes(p.rawPkt[stackOffset+tos.Length():]); err != nil {
 				return 0, err
 			}
-
-			// MAC and optionally encrypt
-			tos.UpdateMacInPlace(key, newTos, prevEntry.Mac)
-			if p.intLayer.Encrypt {
-				if err := tos.Encrypt(key); err != nil {
+			if !p.intLayer.Encrypt {
+				if _, err := tos.SerializeToSliceMac(newTos, prevEntry.Mac, key); err != nil {
+					return 0, err
+				}
+			} else {
+				var nonce [slayers.IntNonceLen]byte
+				frand.Read(nonce[:])
+				if _, err := tos.SerializeToSliceEncrypt(newTos, prevEntry.Mac, key, nonce); err != nil {
 					return 0, err
 				}
 			}
