@@ -6,6 +6,7 @@ go_library(
         "conn.go",
         "idint.go",
         "interface.go",
+        "key_cache.go",
         "packet.go",
         "packet_conn.go",
         "path.go",

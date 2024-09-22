@@ -1,5 +1,6 @@
 // Copyright 2020 Anapaya Systems
 // Copyright 2023 ETH Zurich
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1184,7 +1185,7 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 
 	// Calculate MAC and encrypt only at the last BR before leaving the AS or
 	// delivering to the end host. We trust intra-AS links.
-	closeEntry := lastBr || (p.intLayer.AggregationMode == slayers.IntAggrUnlimited)
+	closeEntry := lastBr || (p.intLayer.AggregationMode == slayers.IdIntAgrOff)
 
 	// Check delay hops
 	if p.intLayer.DelayHops > 0 {
@@ -1203,13 +1204,13 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 		var verifIA addr.IA
 		var verifHost []byte
 		switch p.intLayer.Verifier {
-		case slayers.IntVerifSrc:
+		case slayers.IdIntVerifSrc:
 			verifIA = p.scionLayer.SrcIA
 			verifHost = p.scionLayer.RawSrcAddr
-		case slayers.IntVerifDest:
+		case slayers.IdIntVerifDst:
 			verifIA = p.scionLayer.DstIA
 			verifHost = p.scionLayer.RawDstAddr
-		case slayers.IntVerifThirdParty:
+		case slayers.IdIntVerifOther:
 			verifIA = p.intLayer.VerifIA
 			verifHost = p.intLayer.RawVerifAddr
 		default:
@@ -1249,20 +1250,19 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 		newEntry = true
 	} else {
 		switch p.intLayer.AggregationMode {
-		case slayers.IntAggrUnlimited:
+		case slayers.IdIntAgrOff:
 			newEntry = true
-		case slayers.IntAggrPerAS:
+		case slayers.IdIntAgrAS:
 			newEntry = false
-		case slayers.IntAggrPerBr:
+		case slayers.IdIntAgrBR:
 			newEntry = lastBr
-		case slayers.IntAggrPerIntRtr: // this BR can never be internal router
+		case slayers.IdIntAgrRtr: // this BR can never be internal router
 			newEntry = lastBr
 		default:
 			return 0, serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
 		}
 	}
-	// TODO(lschulz): Don't attempt merge if previous sibling router did not push
-	// telemetry data.
+	// TODO(lschulz): Don't attempt merge if previous sibling router did not push telemetry data.
 
 	if newEntry {
 		// Create a new entry
@@ -1364,72 +1364,68 @@ func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetad
 	md := slayers.IntMetadata{}
 
 	// Bitmap-controlled metadata
-	if p.intLayer.InstructionBitmap&slayers.IntBitNodeId != 0 {
+	if p.intLayer.InstructionBitmap&slayers.IdIntNodeId != 0 {
 		md.NodeId = p.d.routerID
 		md.NodeIdValid = true
 	}
-	if p.intLayer.InstructionBitmap&slayers.IntBitNodeCnt != 0 {
+	if p.intLayer.InstructionBitmap&slayers.IdIntNodeCnt != 0 {
 		md.NodeCnt = 1
 		md.NodeCntValid = true
 	}
-	if p.intLayer.InstructionBitmap&slayers.IntBitIgrIf != 0 {
+	if p.intLayer.InstructionBitmap&slayers.IdIntIgrIf != 0 {
 		md.IgrIf = p.ingressID
 		md.IgrIfValid = true
 	}
-	if p.intLayer.InstructionBitmap&slayers.IntBitEgrIf != 0 {
+	if p.intLayer.InstructionBitmap&slayers.IdIntEgrIf != 0 {
 		md.EgrIf = res.EgressID
 		md.EgrIfValid = true
 	}
 
 	// Instruction-controlled metadata
-	// TODO(lschulz): Get metadata
-	// - Ingress timestamps
-	// - Interface statistics from interfaceMetrics
-	// - Process metrics from processmetrics
-	// - Ingress/egress queue statistics vie eBPF kprobes
+	// TODO(lschulz): Get more metadata
 	for i := 0; i < 4; i++ {
 		switch p.intLayer.Instruction[i] {
-		case slayers.IntInstZero2:
+		case slayers.IdIntIZero2:
 			md.InstrDataLen[i] = 2
 			md.InstrData[i] = 0
-		case slayers.IntInstZero4:
+		case slayers.IdIntIZero4:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = 0
-		case slayers.IntInstZero6:
+		case slayers.IdIntIZero6:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = 0
-		case slayers.IntInstZero8:
+		case slayers.IdIntIZero8:
 			md.InstrDataLen[i] = 8
 			md.InstrData[i] = 0
 
-		case slayers.IntInstAsn:
+		case slayers.IdIntIAsn:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = uint64(p.d.localIA.AS())
-		case slayers.IntInstIsd:
+		case slayers.IdIntIIsd:
 			md.InstrDataLen[i] = 2
 			md.InstrData[i] = uint64(p.d.localIA.ISD())
 
-		case slayers.IntInstQueueId:
+		case slayers.IdIntIQueueId:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = uint64(p.qid)
 
-		case slayers.IntInstEgScifPktCnt:
+		case slayers.IdIntIEgScifPktCnt:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].PacketsTotal.Load()
-		case slayers.IntInstEgScifPktDrop:
+		case slayers.IdIntIEgScifPktDrop:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].PacketsDropped.Load()
-		case slayers.IntInstEgScifBytes:
+		case slayers.IdIntIEgScifBytes:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].BytesTotal.Load()
 
-		case slayers.IntInstIgScifPktCnt:
+		case slayers.IdIntIIgScifPktCnt:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].PacketsTotal.Load()
-		case slayers.IntInstIgScifPktDrop:
+		case slayers.IdIntIIgScifPktDrop:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].PacketsDropped.Load()
-		case slayers.IntInstIgScifBytes:
+		case slayers.IdIntIIgScifBytes:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].BytesTotal.Load()
 

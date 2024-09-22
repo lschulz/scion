@@ -1,4 +1,4 @@
-// Copyright 2024 OvGU Magdeburg
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,75 +38,20 @@ const (
 	maxConcurrentKeyFetchers = 32
 )
 
-type cachedKey struct {
-	key [2]drkey.Level1Key
-}
-
-func (c *cachedKey) getValidKey(validity time.Time) (drkey.Level1Key, bool) {
-	for i := 0; i < 2; i++ {
-		if c.key[i].Epoch.Contains(validity) {
-			return c.key[i], true
-		}
-	}
-	return drkey.Level1Key{}, false
-}
-
-func (c *cachedKey) getExpiry() time.Time {
-	if c.key[0].Epoch.NotAfter.After(c.key[1].Epoch.NotAfter) {
-		return c.key[0].Epoch.NotAfter
-	} else {
-		return c.key[0].Epoch.NotAfter
-	}
-}
-
-func (c *cachedKey) updateKey(key drkey.Level1Key) {
-	if c.key[0].Epoch.NotAfter.Before(c.key[1].Epoch.NotAfter) {
-		c.key[0] = key
-	} else {
-		c.key[1] = key
-	}
-}
-
-// var errNotReachable = serrors.New("AS not reachable")
 var ErrNotReady = serrors.New("key is being fetched")
 
-// Fetcher obtains Level1 DRKeys from a local CS.
-type Fetcher interface {
-	Level1(ctx context.Context, meta drkey.Level1Meta) (drkey.Level1Key, error)
-}
-
-type Prefetcher interface {
-	RefreshKeys(ctx context.Context)
-}
-
-type PrefetchTask struct {
-	LocalIA     addr.IA
-	Prefetcher  Prefetcher
-	KeyDuration time.Duration
-}
-
-// Name returns the tasks name.
-func (p *PrefetchTask) Name() string {
-	return fmt.Sprintf("drkey_prefetcher_%s", p.LocalIA)
-}
-
-// Run requests the level 1 keys to other CSs via a local CS.
-func (p *PrefetchTask) Run(ctx context.Context) {
-	p.Prefetcher.RefreshKeys(ctx)
-}
-
+// DRKey key provider for the router dataplane.
 type Provider struct {
-	// Identity of the local AS.
+	// Identity of the local AS
 	localIA addr.IA
-	// Lock protecting access to keyCache and fetching.
+	// Lock protecting access to keyCache and fetching
 	cacheLock sync.Mutex
-	// Level 1 DRKeys of all known responsive ASes.
+	// Level-1 DRKeys of all known responsive ASes
 	keyCache map[addr.IA]*cachedKey
-	// Set of level 1 keys that are currently being fetched
+	// Set of level-1 keys that are currently being fetched
 	fetching map[addr.IA]context.CancelFunc
 	// Dialer for connecting to CS
-	dialer libgrpc.TCPDialer
-	// Fait group for key fetching goroutines
+	dialer         libgrpc.TCPDialer
 	fetcherWg      sync.WaitGroup
 	prefetchCache  *arc.ARCCache[addr.IA, struct{}]
 	prefetcher     PrefetchTask
@@ -291,4 +236,59 @@ func (p *Provider) updateKey(key drkey.Level1Key) {
 		p.keyCache[key.DstIA] = e
 	}
 	e.updateKey(key)
+}
+
+// In-memory level-1 DRKey key cache.
+type cachedKey struct {
+	key [2]drkey.Level1Key
+}
+
+func (c *cachedKey) getValidKey(validity time.Time) (drkey.Level1Key, bool) {
+	for i := 0; i < 2; i++ {
+		if c.key[i].Epoch.Contains(validity) {
+			return c.key[i], true
+		}
+	}
+	return drkey.Level1Key{}, false
+}
+
+func (c *cachedKey) getExpiry() time.Time {
+	if c.key[0].Epoch.NotAfter.After(c.key[1].Epoch.NotAfter) {
+		return c.key[0].Epoch.NotAfter
+	} else {
+		return c.key[0].Epoch.NotAfter
+	}
+}
+
+func (c *cachedKey) updateKey(key drkey.Level1Key) {
+	if c.key[0].Epoch.NotAfter.Before(c.key[1].Epoch.NotAfter) {
+		c.key[0] = key
+	} else {
+		c.key[1] = key
+	}
+}
+
+// Fetcher obtains Level1 DRKeys from a local CS.
+type Fetcher interface {
+	Level1(ctx context.Context, meta drkey.Level1Meta) (drkey.Level1Key, error)
+}
+
+type Prefetcher interface {
+	RefreshKeys(ctx context.Context)
+}
+
+type PrefetchTask struct {
+	LocalIA     addr.IA
+	Prefetcher  Prefetcher
+	KeyDuration time.Duration
+}
+
+// Name returns the tasks name.
+func (p *PrefetchTask) Name() string {
+	return fmt.Sprintf("drkey_prefetcher_%s", p.LocalIA)
+}
+
+// Run requests the level 1 keys to other CSs via a local CS.
+func (p *PrefetchTask) Run(ctx context.Context) {
+	p.Prefetcher.RefreshKeys(ctx)
 }

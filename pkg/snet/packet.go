@@ -1,4 +1,5 @@
 // Copyright 2020 Anapaya Systems
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -585,9 +586,6 @@ func (p *Packet) Serialize() error {
 
 	// XXX(roosd): Currently, this does not take the extension headers
 	// into consideration.
-	// TODO(lschulz): PayloadLen is also calculated SerializeLayers taking all following header
-	// into account. This line can probably be removed.
-	// scionLayer.PayloadLen = uint16(p.Payload.length())
 
 	// At this point all the fields in the SCION header apart from the path
 	// and path type must be set already.
@@ -605,7 +603,7 @@ func (p *Packet) Serialize() error {
 			nextHdr = slayers.L4SCMP
 		}
 		var intLayer slayers.IDINT
-		if err := p.Telemetry.EncodeTo(&intLayer, nextHdr, 0); err != nil {
+		if err := p.Telemetry.(*IntRequest).EncodeTo(&intLayer, nextHdr, 0); err != nil {
 			return serrors.WrapStr("setting telemetry header", err)
 		}
 		packetLayers = append(packetLayers, &intLayer)
@@ -646,8 +644,8 @@ type PacketInfo struct {
 	Source SCIONAddress
 	// Path contains a SCION forwarding path. This field must not be nil.
 	Path DataplanePath
-	// IntRequest or IntResponse
-	Telemetry InBandTelemetry
+	// IntRequest or RawIntReport
+	Telemetry IdInt
 	// Payload is the Payload of the message.
 	Payload Payload
 }

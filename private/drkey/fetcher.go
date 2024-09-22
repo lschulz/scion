@@ -1,4 +1,4 @@
-// Copyright 2024 OvGU Magdeburg
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,49 +29,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-func level1MetaToProtoRequest(meta drkey.Level1Meta) *cppb.DRKeyIntraLevel1Request {
-	return &cppb.DRKeyIntraLevel1Request{
-		ValTime:    timestamppb.New(meta.Validity),
-		ProtocolId: dkpb.Protocol(meta.ProtoId),
-		SrcIa:      uint64(meta.SrcIA),
-		DstIa:      uint64(meta.DstIA),
-	}
-}
-
-func getLevel1KeyFromReply(
-	meta drkey.Level1Meta,
-	rep *cppb.DRKeyIntraLevel1Response,
-) (drkey.Level1Key, error) {
-
-	err := rep.EpochBegin.CheckValid()
-	if err != nil {
-		return drkey.Level1Key{}, serrors.WrapStr("invalid EpochBegin from response", err)
-	}
-	err = rep.EpochEnd.CheckValid()
-	if err != nil {
-		return drkey.Level1Key{}, serrors.WrapStr("invalid EpochEnd from response", err)
-	}
-	epoch := drkey.Epoch{
-		Validity: cppki.Validity{
-			NotBefore: rep.EpochBegin.AsTime(),
-			NotAfter:  rep.EpochEnd.AsTime(),
-		},
-	}
-	returningKey := drkey.Level1Key{
-		SrcIA:   meta.SrcIA,
-		DstIA:   meta.DstIA,
-		Epoch:   epoch,
-		ProtoId: meta.ProtoId,
-	}
-	if len(rep.Key) != 16 {
-		return drkey.Level1Key{}, serrors.New("key size in reply is not 16 bytes",
-			"len", len(rep.Key))
-	}
-	copy(returningKey.Key[:], rep.Key)
-	return returningKey, nil
-}
-
-// Fetcher obtains Level1 DRKeys from a local CS.
+// GrpcFetcher obtains Level1 DRKeys from a local CS.
 type GrpcFetcher struct {
 	Dialer libgrpc.TCPDialer
 	conn   *grpc.ClientConn
@@ -121,5 +79,46 @@ func (f *GrpcFetcher) Level1(
 		}
 		return lvl1Key, nil
 	}
+}
 
+func level1MetaToProtoRequest(meta drkey.Level1Meta) *cppb.DRKeyIntraLevel1Request {
+	return &cppb.DRKeyIntraLevel1Request{
+		ValTime:    timestamppb.New(meta.Validity),
+		ProtocolId: dkpb.Protocol(meta.ProtoId),
+		SrcIa:      uint64(meta.SrcIA),
+		DstIa:      uint64(meta.DstIA),
+	}
+}
+
+func getLevel1KeyFromReply(
+	meta drkey.Level1Meta,
+	rep *cppb.DRKeyIntraLevel1Response,
+) (drkey.Level1Key, error) {
+
+	err := rep.EpochBegin.CheckValid()
+	if err != nil {
+		return drkey.Level1Key{}, serrors.WrapStr("invalid EpochBegin from response", err)
+	}
+	err = rep.EpochEnd.CheckValid()
+	if err != nil {
+		return drkey.Level1Key{}, serrors.WrapStr("invalid EpochEnd from response", err)
+	}
+	epoch := drkey.Epoch{
+		Validity: cppki.Validity{
+			NotBefore: rep.EpochBegin.AsTime(),
+			NotAfter:  rep.EpochEnd.AsTime(),
+		},
+	}
+	returningKey := drkey.Level1Key{
+		SrcIA:   meta.SrcIA,
+		DstIA:   meta.DstIA,
+		Epoch:   epoch,
+		ProtoId: meta.ProtoId,
+	}
+	if len(rep.Key) != 16 {
+		return drkey.Level1Key{}, serrors.New("key size in reply is not 16 bytes",
+			"len", len(rep.Key))
+	}
+	copy(returningKey.Key[:], rep.Key)
+	return returningKey, nil
 }

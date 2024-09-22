@@ -1,3 +1,17 @@
+// Copyright 2024 OVGU Magdeburg
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package snet
 
 import (
@@ -13,13 +27,16 @@ import (
 	"lukechampine.com/frand"
 )
 
-const IntDataMaxAgeNano = 60_000_000_000
+// How much an ID-INT timestamp is allowed to be in the past for the data to
+// still be considered valid. In nanoseconds.
+const idintMaxAge = 60_000_000_000
 
-type InBandTelemetry interface {
-	EncodeTo(intLayer *slayers.IDINT, nextLayer slayers.L4ProtocolType, sourcePort uint16) error
+// IntRequest of RawIntReport for PacketInfo struct
+type IdInt interface {
 	DecodeFrom(intLayer *slayers.IDINT) error
 }
 
+// ID-INT request to be encoded in a packet.
 type IntRequest struct {
 	// Ask routers to encrypt telemetry data
 	Encrypt bool
@@ -35,18 +52,18 @@ type IntRequest struct {
 	ReqIngressIf bool
 	// Get egress interfaces
 	ReqEgressIf bool
-	// IntAggrF{First|Last|Min|Max|Sum}
+	// Aggregate stack entries
 	AggregationMode int
 	// Aggregation function for slot 1-4
 	AggregationFunc [4]uint8
 	// Metadata instruction slot 1-4
 	Instruction [4]uint8
-	// IntVerif{ThirdParty|Dest|Src}
+	// Type of verifier
 	Verifier int
 	// Address of the verifier if not identical to packet source or destination
 	VerifierAddr SCIONAddress
 	// Metadata provided by the source
-	SourceMetadata TelemetryHop
+	SourceMetadata IntHop
 	// Time at which SourceKey is valid
 	SourceTS time.Time
 	// Host->Host DRKey for MACing the source metadata
@@ -66,7 +83,7 @@ func (r *IntRequest) EncodeTo(
 	intLayer.AggregationMode = uint8(r.AggregationMode)
 
 	intLayer.Verifier = uint8(r.Verifier)
-	if r.Verifier == slayers.IntVerifThirdParty {
+	if r.Verifier == slayers.IdIntVerifOther {
 		intLayer.VerifIA = r.VerifierAddr.IA
 		if r.VerifierAddr.Host.Type() == addr.HostTypeIP {
 			if r.VerifierAddr.Host.IP().Is4() {
@@ -86,16 +103,16 @@ func (r *IntRequest) EncodeTo(
 
 	intLayer.InstructionBitmap = 0
 	if r.ReqNodeId {
-		intLayer.InstructionBitmap |= slayers.IntBitNodeId
+		intLayer.InstructionBitmap |= slayers.IdIntNodeId
 	}
 	if r.ReqNodeCount {
-		intLayer.InstructionBitmap |= slayers.IntBitNodeCnt
+		intLayer.InstructionBitmap |= slayers.IdIntNodeCnt
 	}
 	if r.ReqIngressIf {
-		intLayer.InstructionBitmap |= slayers.IntBitIgrIf
+		intLayer.InstructionBitmap |= slayers.IdIntIgrIf
 	}
 	if r.ReqEgressIf {
-		intLayer.InstructionBitmap |= slayers.IntBitEgrIf
+		intLayer.InstructionBitmap |= slayers.IdIntEgrIf
 	}
 
 	intLayer.AggregationFunc = r.AggregationFunc
@@ -139,22 +156,20 @@ func (r *IntRequest) EncodeTo(
 	return nil
 }
 
-// Recover a request struct from an ID-INT header. Does not decode source
-// or decrypt source metadata.
 func (r *IntRequest) DecodeFrom(intLayer *slayers.IDINT) error {
 	r.Encrypt = intLayer.Encrypt
 	r.SkipHops = 0
 	r.MaxStackLen = 4 * int(intLayer.MaxStackLen)
-	r.ReqNodeId = (intLayer.InstructionBitmap & slayers.IntBitNodeId) != 0
-	r.ReqNodeCount = (intLayer.InstructionBitmap & slayers.IntBitNodeCnt) != 0
-	r.ReqIngressIf = (intLayer.InstructionBitmap & slayers.IntBitIgrIf) != 0
-	r.ReqEgressIf = (intLayer.InstructionBitmap & slayers.IntBitEgrIf) != 0
+	r.ReqNodeId = (intLayer.InstructionBitmap & slayers.IdIntNodeId) != 0
+	r.ReqNodeCount = (intLayer.InstructionBitmap & slayers.IdIntNodeCnt) != 0
+	r.ReqIngressIf = (intLayer.InstructionBitmap & slayers.IdIntIgrIf) != 0
+	r.ReqEgressIf = (intLayer.InstructionBitmap & slayers.IdIntEgrIf) != 0
 	r.AggregationMode = int(intLayer.AggregationMode)
 	r.AggregationFunc = intLayer.AggregationFunc
 	r.Instruction = intLayer.Instruction
 
 	r.Verifier = int(intLayer.Verifier)
-	if r.Verifier == slayers.IntVerifThirdParty {
+	if r.Verifier == slayers.IdIntVerifOther {
 		r.VerifierAddr.IA = intLayer.VerifIA
 		if intLayer.VerifierAddrType != slayers.T4Ip && intLayer.VerifierAddrType == slayers.T16Ip {
 			return serrors.New("address not valid as ID-INT verifier", "type", intLayer.VerifierAddrType)
@@ -164,18 +179,22 @@ func (r *IntRequest) DecodeFrom(intLayer *slayers.IDINT) error {
 		}
 	}
 
-	r.SourceMetadata = TelemetryHop{}
+	r.SourceMetadata = IntHop{}
 	r.SourceTS = time.Unix(0, int64(intLayer.SourceTsPort>>16))
 	r.SourceKey = drkey.Key{}
 
 	return nil
 }
 
+// Raw ID-INT headers as received from another host. Must be decoded/decrypted
+// to an IntReport in order to be read.
 type RawIntReport struct {
 	header slayers.IDINT
 	stack  []slayers.IntStackEntry
 }
 
+// Recover the original request strict from an ID-INT header. Does not include
+// the source metadata or key.
 func (r *RawIntReport) RecoverRequest(request *IntRequest) error {
 	if err := request.DecodeFrom(&r.header); err != nil {
 		return err
@@ -191,6 +210,7 @@ func (r *RawIntReport) RecoverRequest(request *IntRequest) error {
 	return nil
 }
 
+// Length of the raw report when serialized to a packet header.
 func (r *RawIntReport) SerializedLength() int {
 	length := r.header.Length()
 	for i := range r.stack {
@@ -199,7 +219,7 @@ func (r *RawIntReport) SerializedLength() int {
 	return length
 }
 
-// Serializes the ID-INT data in its standard wire format.
+// Serializes the ID-INT data in its packet header format.
 func (r *RawIntReport) SerializeToSlice(buf []byte) (int, error) {
 	if len(buf) < r.header.Length() {
 		return 0, serrors.New("provided buffer is too small",
@@ -222,7 +242,7 @@ func (r *RawIntReport) SerializeToSlice(buf []byte) (int, error) {
 	return offset, nil
 }
 
-// Read ID-INT telemetry from raw bytes.
+// Read ID-INT telemetry from raw header bytes.
 func (r *RawIntReport) DecodeFromBytes(data []byte) error {
 	var intLayer slayers.IDINT
 	err := intLayer.DecodeFromBytes(data, gopacket.NilDecodeFeedback)
@@ -230,11 +250,6 @@ func (r *RawIntReport) DecodeFromBytes(data []byte) error {
 		return err
 	}
 	return r.DecodeFrom(&intLayer)
-}
-
-func (r *RawIntReport) EncodeTo(intLayer *slayers.IDINT,
-	nextLayer slayers.L4ProtocolType, sourcePort uint16) error {
-	panic("not implemented")
 }
 
 func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
@@ -260,8 +275,8 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 	return nil
 }
 
-// Decode the telemetry report without verifying authenticity. Fails if the report
-// contains encrypted data.
+// Decode the telemetry report without verifying authenticity. Fails if the
+// report contains encrypted data.
 func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
 	report.MaxLengthExceeded = r.header.MaxLengthExceeded
 	report.AggregationFunc = r.header.AggregationFunc
@@ -282,205 +297,13 @@ func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
 	return nil
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-// Provides level 2 DRKeys for validating messages from border routers.
-// All methodes require external synchronization if used concurrently.
-type KeyProvider interface {
-	// Gets an AS-Host DRKey valid at the given point of time.
-	GetASHostKey(ctx context.Context, validity time.Time, srcIA addr.IA) (drkey.Key, error)
-	// Gets a Host-Host DRKey valid at the given point of time.
-	GetHostHostKey(ctx context.Context, validity time.Time, srcAddr addr.Addr) (drkey.Key, error)
-	// Refresh keys that will expire soon or already have expired assuming
-	// a global epoch duration of 'keyDuration'.
-	RefreshKeys(ctx context.Context, keyDuration time.Duration) []error
-	// Deletes all keys expired since 'now'.
-	DeleteExpiredKeys(now time.Time)
-}
-
-type DaemonConnector interface {
-	// DRKeyGetASHostKey requests a AS-Host Key from the daemon.
-	DRKeyGetASHostKey(ctx context.Context, meta drkey.ASHostMeta) (drkey.ASHostKey, error)
-	// DRKeyGetHostHostKey requests a Host-Host Key from the daemon.
-	DRKeyGetHostHostKey(ctx context.Context, meta drkey.HostHostMeta) (drkey.HostHostKey, error)
-}
-
-type KeyCache struct {
-	Sciond    DaemonConnector
-	DstIA     addr.IA
-	DstHost   netip.Addr
-	cache     map[addr.IA][]drkey.ASHostKey
-	hostCache map[addr.Addr][]drkey.HostHostKey
-}
-
-func (c *KeyCache) GetASHostKey(
-	ctx context.Context,
-	validity time.Time,
-	srcIA addr.IA,
-) (drkey.Key, error) {
-	if c.cache == nil {
-		c.cache = make(map[addr.IA][]drkey.ASHostKey)
-	}
-
-	keys, ok := c.cache[srcIA]
-	if ok {
-		for i := len(keys) - 1; i >= 0; i-- {
-			if keys[i].Epoch.Contains(validity) {
-				return keys[i].Key, nil
-			}
-		}
-	}
-
-	key, err := c.fetchASHostKey(ctx, validity, srcIA)
-	if err != nil {
-		return drkey.Key{}, err
-	}
-	if ok {
-		c.cache[srcIA] = append(c.cache[srcIA], key)
-	} else {
-		c.cache[srcIA] = []drkey.ASHostKey{key}
-	}
-	return key.Key, nil
-}
-
-func (c *KeyCache) GetHostHostKey(
-	ctx context.Context,
-	validity time.Time,
-	srcAddr addr.Addr,
-) (drkey.Key, error) {
-	if c.hostCache == nil {
-		c.hostCache = make(map[addr.Addr][]drkey.HostHostKey)
-	}
-
-	keys, ok := c.hostCache[srcAddr]
-	if ok {
-		for i := len(keys) - 1; i >= 0; i-- {
-			if keys[i].Epoch.Contains(validity) {
-				return keys[i].Key, nil
-			}
-		}
-	}
-
-	key, err := c.fetchHostHostKey(ctx, validity, srcAddr)
-	if err != nil {
-		return drkey.Key{}, err
-	}
-	if ok {
-		c.hostCache[srcAddr] = append(c.hostCache[srcAddr], key)
-	} else {
-		c.hostCache[srcAddr] = []drkey.HostHostKey{key}
-	}
-	return key.Key, nil
-}
-
-func (c *KeyCache) RefreshKeys(ctx context.Context, keyDuration time.Duration) []error {
-
-	errors := make([]error, 0)
-	t := time.Now().Add(keyDuration / 2)
-
-	if c.cache != nil {
-		for srcIA, keys := range c.cache {
-			if len(keys) == 0 || keys[len(keys)-1].Epoch.NotAfter.After(t) {
-				key, err := c.fetchASHostKey(ctx, t, srcIA)
-				if err != nil {
-					errors = append(errors, err)
-					continue
-				}
-				if len(keys) > 0 && keys[len(keys)-1].Epoch.Covers(key.Epoch.Validity) {
-					continue
-				}
-				c.cache[srcIA] = append(c.cache[srcIA], key)
-			}
-		}
-	}
-
-	if c.hostCache != nil {
-		for srcAddr, keys := range c.hostCache {
-			if len(keys) == 0 || keys[len(keys)-1].Epoch.NotAfter.After(t) {
-				key, err := c.fetchHostHostKey(ctx, t, srcAddr)
-				if err != nil {
-					errors = append(errors, err)
-					continue
-				}
-				if len(keys) > 0 && keys[len(keys)-1].Epoch.Covers(key.Epoch.Validity) {
-					continue
-				}
-				c.hostCache[srcAddr] = append(c.hostCache[srcAddr], key)
-			}
-		}
-	}
-
-	return errors
-}
-
-func (c *KeyCache) DeleteExpiredKeys(now time.Time) {
-	if c.cache != nil {
-		for srcIA, keys := range c.cache {
-			for i, key := range keys {
-				if key.Epoch.NotAfter.After(now) {
-					c.cache[srcIA] = c.cache[srcIA][i:]
-					break
-				}
-			}
-		}
-	}
-	if c.hostCache != nil {
-		for srcAddr, keys := range c.hostCache {
-			for i, key := range keys {
-				if key.Epoch.NotAfter.After(now) {
-					c.hostCache[srcAddr] = c.hostCache[srcAddr][i:]
-					break
-				}
-			}
-		}
-	}
-}
-
-// Gets an AS-Host key from Daemon.
-func (c *KeyCache) fetchASHostKey(
-	ctx context.Context,
-	validity time.Time,
-	srcIA addr.IA,
-) (drkey.ASHostKey, error) {
-	meta := drkey.ASHostMeta{
-		ProtoId:  drkey.IDINT,
-		Validity: validity,
-		SrcIA:    srcIA,
-		DstIA:    c.DstIA,
-		DstHost:  c.DstHost.String(),
-	}
-	key, err := c.Sciond.DRKeyGetASHostKey(ctx, meta)
-	if err != nil {
-		return drkey.ASHostKey{}, err
-	}
-	return key, nil
-}
-
-// Gets a Host-Host key from Daemon.
-func (c *KeyCache) fetchHostHostKey(
-	ctx context.Context,
-	validity time.Time,
-	srcAddr addr.Addr,
-) (drkey.HostHostKey, error) {
-	meta := drkey.HostHostMeta{
-		ProtoId:  drkey.IDINT,
-		Validity: validity,
-		SrcIA:    srcAddr.IA,
-		DstIA:    c.DstIA,
-		SrcHost:  srcAddr.Host.String(),
-		DstHost:  c.DstHost.String(),
-	}
-	key, err := c.Sciond.DRKeyGetHostHostKey(ctx, meta)
-	if err != nil {
-		return drkey.HostHostKey{}, err
-	}
-	return key, nil
-}
-
 type HopToIA func(uint) (addr.IA, error)
 
-////////////////////////////////////////////////////////////////////////////////
-
+// Decodes and verifies telemetry data. Fails if the data cannot be decrypted or
+// verified.
+// keyProv must provide DRKeys for hop verification.
+// hopToIA maps hop indices to the ISD-ASN of the corresponding AS along the
+// path.
 func (r *RawIntReport) VerifyAndDecrypt(
 	ctx context.Context,
 	report *IntReport,
@@ -497,7 +320,7 @@ func (r *RawIntReport) VerifyAndDecrypt(
 	elapsed := (uint64(now.UnixNano()&0xffff_ffff_ffff) - (r.header.SourceTsPort >> 16))
 	elapsed &= 0xffff_ffff_ffff
 	ts := now.UnixNano() - int64(elapsed)
-	if elapsed > IntDataMaxAgeNano {
+	if elapsed > idintMaxAge {
 		return serrors.New("metadata timestamp too far in the past", "ts", ts)
 	}
 	sourceTime := time.Unix(0, ts).UTC()
@@ -553,7 +376,7 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 			return err
 		}
 	}
-	if !CompareMACs(entry.Mac[:], mac[:slayers.IntMacLen]) {
+	if !compareMACs(entry.Mac[:], mac[:slayers.IntMacLen]) {
 		return serrors.New("telemetry MAC verification failed",
 			"expected", mac, "actual", entry.Mac[:])
 	}
@@ -562,20 +385,8 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 	return nil
 }
 
-func CompareMACs(a []byte, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func decodeMetadata(entry *slayers.IntStackEntry) (TelemetryHop, error) {
-	hop := TelemetryHop{
+func decodeMetadata(entry *slayers.IntStackEntry) (IntHop, error) {
+	hop := IntHop{
 		HopIndex:   entry.HopIndex,
 		Source:     entry.SourceMetadata,
 		Ingress:    entry.Ingress,
@@ -605,116 +416,131 @@ func decodeMetadata(entry *slayers.IntStackEntry) (TelemetryHop, error) {
 	return hop, nil
 }
 
+func compareMACs(a []byte, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Decoded ID-INT header with metadata from remote routers.
 type IntReport struct {
-	// Some metadata omitted because the maximum stack length was reached
+	// Whether metadata was omitted because the maximum stack length was reached
 	MaxLengthExceeded bool
-	// IntAggrF{First|Last|Min|Max|Sum}
+	// Requested metadata aggregation mode
 	AggregationMode int
 	// Aggregation function for slot 1-4
 	AggregationFunc [4]uint8
 	// Metadata instruction slot 1-4
 	Instruction [4]uint8
 	// Telemetry data in path order (source to destination)
-	Data []TelemetryHop
+	Data []IntHop
 }
 
-type TelemetryHop struct {
+// ID-INT metadata from a single hop.
+type IntHop struct {
 	// Which hop field to data relates to
 	HopIndex uint8
 
 	metadataMask   uint8
 	metadataLength [4]int
 
-	Source     bool
-	Ingress    bool
-	Egress     bool
-	Aggregated bool
-	Encrypted  bool
+	Source     bool // Source entry flag
+	Ingress    bool // AS-ingress BR flag
+	Egress     bool // AS-egress BR flag
+	Aggregated bool // Aggregated data flag
+	Encrypted  bool // Original entry was encrypted
 
-	NodeId    uint32
-	NodeCount uint16
-	IngressIf uint16
-	EgressIf  uint16
+	NodeId    uint32 // ID of the originating node
+	NodeCount uint16 // NUmber of aggregated notes in this entry
+	IngressIf uint16 // Node ingress interface (not IfID)
+	EgressIf  uint16 // Node egress interface (not IfID)
 
+	// Instruction-requested metadata
 	DataSlots [4]uint64
 }
 
-func (h *TelemetryHop) HasNodeId() bool {
-	return (h.metadataMask & slayers.IntBitNodeId) != 0
+func (h *IntHop) HasNodeId() bool {
+	return (h.metadataMask & slayers.IdIntNodeId) != 0
 }
 
-func (h *TelemetryHop) SetNodeId(id uint32) {
-	h.metadataMask |= slayers.IntBitNodeId
+func (h *IntHop) SetNodeId(id uint32) {
+	h.metadataMask |= slayers.IdIntNodeId
 	h.NodeId = id
 }
 
-func (h *TelemetryHop) ClearNodeId() {
-	h.metadataMask &= ^slayers.IntBitNodeId
+func (h *IntHop) ClearNodeId() {
+	h.metadataMask &= ^slayers.IdIntNodeId
 }
 
-func (h *TelemetryHop) HasNodeCount() bool {
-	return (h.metadataMask & slayers.IntBitNodeCnt) != 0
+func (h *IntHop) HasNodeCount() bool {
+	return (h.metadataMask & slayers.IdIntNodeCnt) != 0
 }
 
-func (h *TelemetryHop) SetNodeCount(count uint16) {
-	h.metadataMask |= slayers.IntBitNodeCnt
+func (h *IntHop) SetNodeCount(count uint16) {
+	h.metadataMask |= slayers.IdIntNodeCnt
 	h.NodeCount = count
 }
 
-func (h *TelemetryHop) ClearNodeCount() {
-	h.metadataMask &= ^slayers.IntBitNodeCnt
+func (h *IntHop) ClearNodeCount() {
+	h.metadataMask &= ^slayers.IdIntNodeCnt
 }
 
-func (h *TelemetryHop) HasIngressIf() bool {
-	return (h.metadataMask & slayers.IntBitIgrIf) != 0
+func (h *IntHop) HasIngressIf() bool {
+	return (h.metadataMask & slayers.IdIntIgrIf) != 0
 }
 
-func (h *TelemetryHop) SetIngressIf(igr uint16) {
-	h.metadataMask |= slayers.IntBitIgrIf
+func (h *IntHop) SetIngressIf(igr uint16) {
+	h.metadataMask |= slayers.IdIntIgrIf
 	h.IngressIf = igr
 }
 
-func (h *TelemetryHop) ClearIngressIf() {
-	h.metadataMask &= ^slayers.IntBitIgrIf
+func (h *IntHop) ClearIngressIf() {
+	h.metadataMask &= ^slayers.IdIntIgrIf
 }
 
-func (h *TelemetryHop) HasEgressIf() bool {
-	return (h.metadataMask & slayers.IntBitEgrIf) != 0
+func (h *IntHop) HasEgressIf() bool {
+	return (h.metadataMask & slayers.IdIntEgrIf) != 0
 }
 
-func (h *TelemetryHop) SetEgressIf(egr uint16) {
-	h.metadataMask |= slayers.IntBitEgrIf
+func (h *IntHop) SetEgressIf(egr uint16) {
+	h.metadataMask |= slayers.IdIntEgrIf
 	h.EgressIf = egr
 }
 
-func (h *TelemetryHop) ClearEgressIf() {
-	h.metadataMask &= ^slayers.IntBitEgrIf
+func (h *IntHop) ClearEgressIf() {
+	h.metadataMask &= ^slayers.IdIntEgrIf
 }
 
-func (h *TelemetryHop) DataLength(slot int) int {
+func (h *IntHop) DataLength(slot int) int {
 	return int(h.metadataLength[slot])
 }
 
-func (h *TelemetryHop) SetDataUint16(slot int, data uint16) {
+func (h *IntHop) SetDataUint16(slot int, data uint16) {
 	h.metadataLength[slot] = 2
 	h.DataSlots[slot] = uint64(data)
 }
 
-func (h *TelemetryHop) SetDataUint32(slot int, data uint32) {
+func (h *IntHop) SetDataUint32(slot int, data uint32) {
 	h.metadataLength[slot] = 4
 	h.DataSlots[slot] = uint64(data)
 }
 
-func (h *TelemetryHop) SetDataUint48(slot int, data uint64) {
+func (h *IntHop) SetDataUint48(slot int, data uint64) {
 	h.metadataLength[slot] = 6
 	h.DataSlots[slot] = uint64(data)
 }
 
-func (h *TelemetryHop) SetDataUint64(slot int, data uint64) {
+func (h *IntHop) SetDataUint64(slot int, data uint64) {
 	h.metadataLength[slot] = 8
 	h.DataSlots[slot] = data
 }
 
-func (h *TelemetryHop) ClearData(slot int) {
-	h.metadataMask &= ^slayers.IntBitEgrIf
+func (h *IntHop) ClearData(slot int) {
+	h.metadataMask &= ^slayers.IdIntEgrIf
 }

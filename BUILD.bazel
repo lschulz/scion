@@ -190,6 +190,7 @@ pkg_tar(
         "//daemon/cmd/daemon",
         "//dispatcher/cmd/dispatcher",
         "//gateway/cmd/gateway",
+        "//pkg/fcrypto/benchmark",
         "//router/cmd/router",
         "//scion-pki/cmd/scion-pki",
         "//scion/cmd/scion",

@@ -1,3 +1,17 @@
+// Copyright 2024 OVGU Magdeburg
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package slayers
 
 import (
@@ -9,98 +23,108 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 )
 
+// ID-INT verifier types
 const (
-	IntAggrUnlimited = 0
-	IntAggrPerAS     = 1
-	IntAggrPerBr     = 2
-	IntAggrPerIntRtr = 3
+	IdIntVerifOther = 0
+	IdIntVerifDst   = 1
+	IdIntVerifSrc   = 2
+)
+
+// ID-INT aggregation modes
+const (
+	IdIntAgrOff = 0
+	IdIntAgrAS  = 1
+	IdIntAgrBR  = 2
+	IdIntAgrRtr = 3
+)
+
+// ID-INT aggregation functions
+const (
+	IdIntAFFirst = 0
+	IdIntAFLast  = 1
+	IdIntAFMin   = 2
+	IdIntAFMax   = 3
+	IdIntAFSum   = 4
+)
+
+// ID-INT instruction bitmap
+const (
+	IdIntNodeId  uint8 = 0x08
+	IdIntNodeCnt uint8 = 0x04
+	IdIntIgrIf   uint8 = 0x02
+	IdIntEgrIf   uint8 = 0x01
+)
+
+// ID-INT instructions
+const (
+	IdIntIZero2           = 0x00
+	IdIntIIsd             = 0x01
+	IdIntIBrLinkType      = 0x02
+	IdIntIDeviceTypeRole  = 0x03
+	IdIntICpuMemUsage     = 0x04
+	IdIntICpuTemp         = 0x05
+	IdIntIAsicTemp        = 0x06
+	IdIntIFanSpeed        = 0x07
+	IdIntITotalPower      = 0x08
+	IdIntIEnergyMix       = 0x09
+	IdIntIZero4           = 0x40
+	IdIntIDeviceVendor    = 0x41
+	IdIntIDeviceModel     = 0x42
+	IdIntISoftwareVersion = 0x43
+	IdIntINodeIpv4Addr    = 0x44
+	IdIntIIngressIfSpeed  = 0x45
+	IdIntIEgressIfSpeed   = 0x46
+	IdIntIGpsLat          = 0x47
+	IdIntIGpsLong         = 0x48
+	IdIntIUptime          = 0x49
+	IdIntIFwdEnergy       = 0x4A
+	IdIntICo2Emission     = 0x4B
+	IdIntIIngressLinkRx   = 0x4C
+	IdIntIEgressLinkTx    = 0x4D
+	IdIntIQueueId         = 0x4E
+	IdIntIInstQueueLen    = 0x4F
+	IdIntIAvgQueueLen     = 0x50
+	IdIntIBufferId        = 0x51
+	IdIntIInstBufferOcc   = 0x52
+	IdIntIAvgBufferOcc    = 0x53
+	IdIntIZero6           = 0x80
+	IdIntIAsn             = 0x81
+	IdIntIIngressTstamp   = 0x82
+	IdIntIEgressTstamp    = 0x83
+	IdIntIIgScifPktCnt    = 0x84
+	IdIntIEgScifPktCnt    = 0x85
+	IdIntIIgScifPktDrop   = 0x86
+	IdIntIEgScifPktDrop   = 0x87
+	IdIntIIgScifBytes     = 0x88
+	IdIntIEgScifBytes     = 0x89
+	IdIntIIgPktCnt        = 0x8A
+	IdIntIEgPktCnt        = 0x8B
+	IdIntIIgPktDrop       = 0x8C
+	IdIntIEgPktDrop       = 0x8D
+	IdIntIIgBytes         = 0x8E
+	IdIntIEgBytes         = 0x8F
+	IdIntIZero8           = 0xC0
+	IdIntINodeIpv6AddrH   = 0xC1
+	IdIntINodeIpv6AddrL   = 0xC2
+	IdIntINop             = 0xFF
 )
 
 const (
-	IntVerifThirdParty = 0
-	IntVerifDest       = 1
-	IntVerifSrc        = 2
+	// ID-INT protocol version
+	IdIntVersion = 0
+	// ID-INT telemetry MAC length in bytes
+	IntMacLen = 4
+	// ID-INT noce length for encrypted telemetry in bytes
+	IntNonceLen = 12
+	// Minimum length of the ID-INT main header
+	intMinHdrLen = 20
+	// Length of an empty ID-INT stack entry
+	intEmptyEntryLen = 8
+	// Abolute maximum length of the ID-INT stack
+	intMaxStackLen = 255 * 4
 )
-
-const (
-	IntAggrFFirst = 0
-	IntAggrFLast  = 1
-	IntAggrFMin   = 2
-	IntAggrFMax   = 3
-	IntAggrFSum   = 4
-)
-
-const (
-	IntBitNodeId  uint8 = 0x08
-	IntBitNodeCnt uint8 = 0x04
-	IntBitIgrIf   uint8 = 0x02
-	IntBitEgrIf   uint8 = 0x01
-)
-
-// ID-INT Instructions
-const (
-	IntInstZero2           = 0x00
-	IntInstIsd             = 0x01
-	IntInstBrLinkType      = 0x02
-	IntInstDeviceTypeRole  = 0x03
-	IntInstCpuMemUsage     = 0x04
-	IntInstCpuTemp         = 0x05
-	IntInstAsicTemp        = 0x06
-	IntInstFanSpeed        = 0x07
-	IntInstTotalPower      = 0x08
-	IntInstEnergyMix       = 0x09
-	IntInstZero4           = 0x40
-	IntInstDeviceVendor    = 0x41
-	IntInstDeviceModel     = 0x42
-	IntInstSoftwareVersion = 0x43
-	IntInstNodeIpv4Addr    = 0x44
-	IntInstIngressIfSpeed  = 0x45
-	IntInstEgressIfSpeed   = 0x46
-	IntInstGpsLat          = 0x47
-	IntInstGpsLong         = 0x48
-	IntInstUptime          = 0x49
-	IntInstFwdEnergy       = 0x4A
-	IntInstCo2Emission     = 0x4B
-	IntInstIngressLinkRx   = 0x4C
-	IntInstEgressLinkTx    = 0x4D
-	IntInstQueueId         = 0x4E
-	IntInstInstQueueLen    = 0x4F
-	IntInstAvgQueueLen     = 0x50
-	IntInstBufferId        = 0x51
-	IntInstInstBufferOcc   = 0x52
-	IntInstAvgBufferOcc    = 0x53
-	IntInstZero6           = 0x80
-	IntInstAsn             = 0x81
-	IntInstIngressTstamp   = 0x82
-	IntInstEgressTstamp    = 0x83
-	IntInstIgScifPktCnt    = 0x84
-	IntInstEgScifPktCnt    = 0x85
-	IntInstIgScifPktDrop   = 0x86
-	IntInstEgScifPktDrop   = 0x87
-	IntInstIgScifBytes     = 0x88
-	IntInstEgScifBytes     = 0x89
-	IntInstIgPktCnt        = 0x8A
-	IntInstEgPktCnt        = 0x8B
-	IntInstIgPktDrop       = 0x8C
-	IntInstEgPktDrop       = 0x8D
-	IntInstIgBytes         = 0x8E
-	IntInstEgBytes         = 0x8F
-	IntInstZero8           = 0xC0
-	IntInstNodeIpv6AddrH   = 0xC1
-	IntInstNodeIpv6AddrL   = 0xC2
-	IntInstNop             = 0xFF
-)
-
-const IdIntVersion = 0
-const IntMacLen = 4
-const intMaxStackLen = 255 * 4
-const minIntHdrLen = 20
-const minMetadataHdrLen = 8
-const IntNonceLen = 12
 
 // ID-INT main header
-//
-// Format:
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -116,7 +140,7 @@ const IntNonceLen = 12
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 // |         VerifierISD           |                               | \
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               | |
-// |                          VerifierAS                           | | Only if Vrf == 0
+// |                          VerifierAS                           | | If Vrf == 0
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
 // |                       VerifierHostAddr (4-16 bytes)           | /
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -129,7 +153,8 @@ type IDINT struct {
 
 	// Version of the header. Currently 0.
 	Version uint8
-	// Infrastructure mode. If set, the INT header is removed by the last border router on the path.
+	// Infrastructure mode. If set, the INT header is removed by the last border
+	// router on the path.
 	Infrastructure bool
 	// Discard the packet at the last border router.
 	Discard bool
@@ -159,9 +184,9 @@ type IDINT struct {
 	Instruction [4]uint8
 	// INT source timestamp and egress port. Used as input to DRKey.
 	SourceTsPort uint64
-	// Verifier address if Verifier == IntVerifThirdParty
+	// Verifier address
 	VerifIA addr.IA
-	// Host address of the verifier if Verifier == IntVerifThirdParty
+	// Host address of the verifier
 	RawVerifAddr []byte
 	// Telemetry stack. Length must be a multiple of 4.
 	TelemetryStack []byte
@@ -224,9 +249,9 @@ func (i *IDINT) SerializeToSlice(buf []byte) (int, error) {
 	binary.BigEndian.PutUint64(buf[12:20], i.SourceTsPort)
 
 	// Verifier address
-	offset := minIntHdrLen
-	if i.Verifier == IntVerifThirdParty {
-		if err := i.SerializeVerifierAddr(buf[minIntHdrLen:]); err != nil {
+	offset := intMinHdrLen
+	if i.Verifier == IdIntVerifOther {
+		if err := i.SerializeVerifierAddr(buf[intMinHdrLen:]); err != nil {
 			return offset, err
 		}
 		offset += i.VerifierAddrLen()
@@ -265,10 +290,10 @@ func (i *IDINT) SerializeTo(b gopacket.SerializeBuffer, opts gopacket.SerializeO
 }
 
 func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
-	if len(data) < minIntHdrLen {
+	if len(data) < intMinHdrLen {
 		df.SetTruncated()
 		return serrors.New("packet is shorter than the minimum header length",
-			"min", minIntHdrLen, "actual", len(data))
+			"min", intMinHdrLen, "actual", len(data))
 	}
 
 	// First 4 bytes
@@ -308,9 +333,9 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	i.SourceTsPort = binary.BigEndian.Uint64(data[12:20])
 
 	// Verifier address
-	offset := minIntHdrLen
-	if i.Verifier == IntVerifThirdParty {
-		if err := i.DecodeVerifierAddr(data[minIntHdrLen:]); err != nil {
+	offset := intMinHdrLen
+	if i.Verifier == IdIntVerifOther {
+		if err := i.DecodeVerifierAddr(data[intMinHdrLen:]); err != nil {
 			df.SetTruncated()
 			return err
 		}
@@ -334,11 +359,11 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 }
 
 func (i *IDINT) Length() int {
-	return minIntHdrLen + i.VerifierAddrLen() + i.TrueStackLength()
+	return intMinHdrLen + i.VerifierAddrLen() + i.TrueStackLength()
 }
 
 func (i *IDINT) VerifierAddrLen() int {
-	if i.Verifier == IntVerifThirdParty {
+	if i.Verifier == IdIntVerifOther {
 		return addr.IABytes + i.VerifierAddrType.Length()
 	} else {
 		return 0
@@ -382,8 +407,6 @@ func decodeIDINT(data []byte, pb gopacket.PacketBuilder) error {
 }
 
 // ID-INT metadata header. These are the entries on the metadata stack.
-//
-// Format:
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 // +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -402,11 +425,11 @@ func decodeIDINT(data []byte, pb gopacket.PacketBuilder) error {
 type IntStackEntry struct {
 	BaseLayer
 
-	// Set if this is the source metadata entry, the bottom of the stack.
+	// Set if this is the source metadata entry at the bottom of the stack.
 	SourceMetadata bool
-	// Ingress border router
+	// From AS-ingress border router
 	Ingress bool
-	// Egress border router
+	// From AS-egress border router
 	Egress bool
 	// Contains aggregated data
 	Aggregated bool
@@ -417,10 +440,10 @@ type IntStackEntry struct {
 	HopIndex uint8
 	// Bitmap metadata presence mask (4 bit)
 	MetadataMask uint8
-	// Length of metadata stored in slot 1-4.
+	// Length of metadata stored in slot 1-4
 	MetadataLength [4]uint8
 
-	// Nonce for encrypted data
+	// Nonce for encrypted data, Considered valid iff Encrypted == true
 	Nonce [IntNonceLen]byte
 	// Encoded metadata with padding to a multiple of 4 bytes
 	Metadata []byte
@@ -429,20 +452,20 @@ type IntStackEntry struct {
 }
 
 func (m *IntStackEntry) Length() int {
-	length := minMetadataHdrLen
+	length := intEmptyEntryLen
 	if m.Encrypted {
 		length += IntNonceLen
 	}
-	if m.MetadataMask&IntBitNodeId != 0 {
+	if m.MetadataMask&IdIntNodeId != 0 {
 		length += 4
 	}
-	if m.MetadataMask&IntBitNodeCnt != 0 {
+	if m.MetadataMask&IdIntNodeCnt != 0 {
 		length += 2
 	}
-	if m.MetadataMask&IntBitIgrIf != 0 {
+	if m.MetadataMask&IdIntIgrIf != 0 {
 		length += 2
 	}
-	if m.MetadataMask&IntBitEgrIf != 0 {
+	if m.MetadataMask&IdIntEgrIf != 0 {
 		length += 2
 	}
 	for _, x := range m.MetadataLength {
@@ -495,9 +518,9 @@ func (m *IntStackEntry) SerializeToSlice(buf []byte) (int, error) {
 }
 
 func (m *IntStackEntry) DecodeFromBytes(data []byte) error {
-	if len(data) < minMetadataHdrLen {
+	if len(data) < intEmptyEntryLen {
 		return serrors.New("metadata header too short",
-			"min", minMetadataHdrLen, "actual", len(data))
+			"min", intEmptyEntryLen, "actual", len(data))
 	}
 
 	// First 4 bytes
@@ -554,16 +577,16 @@ func (e *IntStackEntry) SetMetadata(md *IntMetadata) error {
 	// Update metadata presence bitmap
 	e.MetadataMask = 0
 	if md.NodeIdValid {
-		e.MetadataMask |= IntBitNodeId
+		e.MetadataMask |= IdIntNodeId
 	}
 	if md.NodeCntValid {
-		e.MetadataMask |= IntBitNodeCnt
+		e.MetadataMask |= IdIntNodeCnt
 	}
 	if md.IgrIfValid {
-		e.MetadataMask |= IntBitIgrIf
+		e.MetadataMask |= IdIntIgrIf
 	}
 	if md.EgrIfValid {
-		e.MetadataMask |= IntBitEgrIf
+		e.MetadataMask |= IdIntEgrIf
 	}
 
 	// Update metadata slot length fields
@@ -663,12 +686,16 @@ func (m *IntStackEntry) EncryptSource(
 // Decrypts the metadata and MAC of a source stack entry using the nonce from
 // the header. Calculates and returns the expected nonce. Comapre to the nonce
 // in the header to validate telemetry integrity.
-func (m *IntStackEntry) DecryptSource(key [16]byte, intLayer *IDINT) ([IntMacLen]byte, error) {
+func (m *IntStackEntry) DecryptSource(
+	key [16]byte, intLayer *IDINT,
+) ([IntMacLen]byte, error) {
+
 	if m.Encrypted {
 		m.encdecImpl(key)
 	}
+	// clear encrypted flag after calcSourceMac so nonce is included in MAC
 	mac, err := m.calcSourceMac(key, intLayer)
-	m.Encrypted = false // set this after calcSourceMac so nonce is still included in MAC
+	m.Encrypted = false
 	if err != nil {
 		return [IntMacLen]byte{}, err
 	}
@@ -678,12 +705,16 @@ func (m *IntStackEntry) DecryptSource(key [16]byte, intLayer *IDINT) ([IntMacLen
 // Decrypts the metadata and MAC of this stack entry using the nonce from the
 // header. Calculates and returns the expected nonce. Comapre to the nonce in
 // the header to validate telemetry integrity.
-func (m *IntStackEntry) Decrypt(key [16]byte, prevMac [IntMacLen]byte) ([IntMacLen]byte, error) {
+func (m *IntStackEntry) Decrypt(
+	key [16]byte, prevMac [IntMacLen]byte,
+) ([IntMacLen]byte, error) {
+
 	if m.Encrypted {
 		m.encdecImpl(key)
 	}
+	// clear encrypted flag after calcSourceMac so nonce is included in MAC
 	mac, err := m.calcMac(key, prevMac)
-	m.Encrypted = false // set this after calcSourceMac so nonce is still included in MAC
+	m.Encrypted = false
 	if err != nil {
 		return [IntMacLen]byte{}, err
 	}
@@ -699,8 +730,6 @@ func (m *IntStackEntry) encdecImpl(key [16]byte) {
 }
 
 // Calculate telemetry MAC.
-// prevMac is the MAC of the previous entry on the stack.
-//
 // The MAC is computed over the following fields:
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -734,7 +763,6 @@ func (m *IntStackEntry) calcMac(key [16]byte, prevMac [IntMacLen]byte) ([IntMacL
 }
 
 // Calculates and returns the MAC for the INT source entry on the telemetry stack.
-//
 // The Mac is calculated over to following fields:
 // 0                   1                   2                   3
 // 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
@@ -840,23 +868,23 @@ func (d *IntMetadata) Merge(aggrFuncs [4]uint8, other *IntMetadata) error {
 	for i := 0; i < 4; i++ {
 		if d.InstrDataLen[i] != 0 && other.InstrDataLen[i] != 0 {
 			switch aggrFuncs[i] {
-			case IntAggrFFirst:
+			case IdIntAFFirst:
 				// keep old value
-			case IntAggrFLast:
+			case IdIntAFLast:
 				d.InstrDataLen[i] = other.InstrDataLen[i]
 				d.InstrData[i] = other.InstrData[i]
 				updateNode = true
-			case IntAggrFMin:
+			case IdIntAFMin:
 				if d.InstrData[i] > other.InstrData[i] {
 					d.InstrData[i] = other.InstrData[i]
 					updateNode = true
 				}
-			case IntAggrFMax:
+			case IdIntAFMax:
 				if d.InstrData[i] < other.InstrData[i] {
 					d.InstrData[i] = other.InstrData[i]
 					updateNode = true
 				}
-			case IntAggrFSum:
+			case IdIntAFSum:
 				d.InstrData[i] = d.InstrData[i] + other.InstrData[i]
 				updateNode = true
 			}
@@ -949,7 +977,7 @@ func (d *IntMetadata) SerializeToSlice(buf []byte) (int, error) {
 func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 	offset := 0
 
-	if entry.MetadataMask&IntBitNodeId != 0 {
+	if entry.MetadataMask&IdIntNodeId != 0 {
 		d.NodeId = binary.BigEndian.Uint32(data[offset : offset+4])
 		offset += 4
 		d.NodeIdValid = true
@@ -957,7 +985,7 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 		d.NodeIdValid = false
 	}
 
-	if entry.MetadataMask&IntBitNodeCnt != 0 {
+	if entry.MetadataMask&IdIntNodeCnt != 0 {
 		d.NodeCnt = binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 		d.NodeCntValid = true
@@ -965,7 +993,7 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 		d.NodeCntValid = false
 	}
 
-	if entry.MetadataMask&IntBitIgrIf != 0 {
+	if entry.MetadataMask&IdIntIgrIf != 0 {
 		d.IgrIf = binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 		d.IgrIfValid = true
@@ -973,7 +1001,7 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 		d.IgrIfValid = false
 	}
 
-	if entry.MetadataMask&IntBitEgrIf != 0 {
+	if entry.MetadataMask&IdIntEgrIf != 0 {
 		d.EgrIf = binary.BigEndian.Uint16(data[offset : offset+2])
 		offset += 2
 		d.EgrIfValid = true
@@ -1007,13 +1035,13 @@ func (d *IntMetadata) DecodeFromBytes(data []byte, entry *IntStackEntry) error {
 	return nil
 }
 
-// Decode metadata length
-// `0xxb` = 0 bytes
-// `100b` = 2 bytes
-// `101b` = 4 bytes
-// `110b` = 6 bytes
-// `111b` = 8 bytes
+// Decode metadata length.
 func decodeMdLen(ml uint8) int {
+	// `0xxb` = 0 bytes
+	// `100b` = 2 bytes
+	// `101b` = 4 bytes
+	// `110b` = 6 bytes
+	// `111b` = 8 bytes
 	if ml&0x4 != 0 {
 		return 2*int(ml&0x3) + 2
 	} else {
@@ -1021,6 +1049,7 @@ func decodeMdLen(ml uint8) int {
 	}
 }
 
+// Inverse of decodeMdLen.
 func encodeMdLen(length int) uint8 {
 	switch length {
 	case 0:
@@ -1038,7 +1067,7 @@ func encodeMdLen(length int) uint8 {
 	}
 }
 
-// DecodingLayer for skipping ID-INT without fully decoding it
+// DecodingLayer for skipping ID-INT without fully decoding it.
 type IdIntSkipper struct {
 	BaseLayer
 
@@ -1067,17 +1096,17 @@ func (s *IdIntSkipper) NextLayerType() gopacket.LayerType {
 }
 
 func (s *IdIntSkipper) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
-	if len(data) < minIntHdrLen {
+	if len(data) < intMinHdrLen {
 		df.SetTruncated()
 		return serrors.New("packet is shorter than the minimum header length",
-			"min", minIntHdrLen, "actual", len(data))
+			"min", intMinHdrLen, "actual", len(data))
 	}
 
 	s.Verifier = uint8((data[1] >> 4) & 0x3)
 	s.VerifierAddrType = AddrType((data[1] & 0xf))
 	s.StackLength = uint8(data[2])
 	s.NextHdr = L4ProtocolType(data[3])
-	s.ActualLength = minIntHdrLen + addr.IABytes + s.VerifierAddrType.Length()
+	s.ActualLength = intMinHdrLen + addr.IABytes + s.VerifierAddrType.Length()
 	s.ActualLength += 4 * int(s.StackLength)
 
 	return nil
