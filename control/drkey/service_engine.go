@@ -152,7 +152,7 @@ func (s *ServiceEngine) DeriveHostAS(
 
 	level1Key, err := s.obtainLevel1Key(ctx, meta.ProtoId, meta.Validity, meta.SrcIA, meta.DstIA)
 	if err != nil {
-		return drkey.HostASKey{}, serrors.WrapStr("getting  level1 key", err)
+		return drkey.HostASKey{}, serrors.WrapStr("getting level1 key", err)
 	}
 
 	var deriver interface {

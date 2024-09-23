@@ -127,6 +127,15 @@ var (
 		},
 	)
 
+	LayerTypeIDINT = gopacket.RegisterLayerType(
+		1300,
+		gopacket.LayerTypeMetadata{
+			Name:    "ID-INT",
+			Decoder: gopacket.DecodeFunc(decodeIDINT),
+		},
+	)
+	LayerClassIDINT gopacket.LayerClass = LayerTypeIDINT
+
 	// layerTypeBFD is the identifier for gopacket/layers.LayerTypeBFD.
 	// Defining this with a constant here allows to build slayers without linking
 	// against gopacket/layers and still allow easily parsing SCION/BFD packets

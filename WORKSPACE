@@ -70,7 +70,21 @@ http_archive(
     ],
 )
 
-load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
+load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies", "go_repository")
+
+go_repository(
+    name = "com_lukechampine_frand",
+    importpath = "lukechampine.com/frand",
+    sum = "h1:RzFIpOvkMXuPMBb9maa4ND4wjBn71E1Jpf8BzJHMaVw=",
+    version = "v1.4.2",
+)
+
+go_repository(
+    name = "com_github_aead_chacha20",
+    importpath = "github.com/aead/chacha20",
+    sum = "h1:KjTM2ks9d14ZYCvmHS9iAKVt9AyzRSqNU1qabPih5BY=",
+    version = "v0.0.0-20180709150244-8b13a72661da",
+)
 
 go_rules_dependencies()
 

@@ -299,6 +299,8 @@ func scionNextLayerType(t L4ProtocolType) gopacket.LayerType {
 	switch t {
 	case HopByHopClass:
 		return LayerTypeHopByHopExtn
+	case IDINTClass:
+		return LayerTypeIDINT
 	case End2EndClass:
 		return LayerTypeEndToEndExtn
 	default:
@@ -313,6 +315,23 @@ func scionNextLayerTypeAfterHBH(t L4ProtocolType) gopacket.LayerType {
 	switch t {
 	case HopByHopClass:
 		return gopacket.LayerTypeDecodeFailure
+	case IDINTClass:
+		return LayerTypeIDINT
+	case End2EndClass:
+		return LayerTypeEndToEndExtn
+	default:
+		return scionNextLayerTypeL4(t)
+	}
+}
+
+// scionNextLayerTypeAfterINT returns the layer type for the given protocol
+// identifier in a ID-INT header, excluding (repeated) ID-INT headers
+func scionNextLayerTypeAfterINT(t L4ProtocolType) gopacket.LayerType {
+	switch t {
+	case HopByHopClass:
+		return gopacket.LayerTypeDecodeFailure
+	case IDINTClass:
+		return gopacket.LayerTypeDecodeFailure
 	case End2EndClass:
 		return LayerTypeEndToEndExtn
 	default:
@@ -326,6 +345,8 @@ func scionNextLayerTypeAfterHBH(t L4ProtocolType) gopacket.LayerType {
 func scionNextLayerTypeAfterE2E(t L4ProtocolType) gopacket.LayerType {
 	switch t {
 	case HopByHopClass:
+		return gopacket.LayerTypeDecodeFailure
+	case IDINTClass:
 		return gopacket.LayerTypeDecodeFailure
 	case End2EndClass:
 		return gopacket.LayerTypeDecodeFailure

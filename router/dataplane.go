@@ -1,5 +1,6 @@
 // Copyright 2020 Anapaya Systems
 // Copyright 2023 ETH Zurich
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,16 +29,20 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/net/ipv4"
+	"google.golang.org/grpc/resolver"
+	"lukechampine.com/frand"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/pkg/drkey"
 	libepic "github.com/scionproto/scion/pkg/experimental/epic"
+	libgrpc "github.com/scionproto/scion/pkg/grpc"
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/processmetrics"
 	"github.com/scionproto/scion/pkg/private/serrors"
@@ -50,6 +55,7 @@ import (
 	"github.com/scionproto/scion/pkg/slayers/path/onehop"
 	"github.com/scionproto/scion/pkg/slayers/path/scion"
 	"github.com/scionproto/scion/pkg/spao"
+	int_drkey "github.com/scionproto/scion/private/drkey"
 	"github.com/scionproto/scion/private/drkey/drkeyutil"
 	"github.com/scionproto/scion/private/topology"
 	underlayconn "github.com/scionproto/scion/private/underlay/conn"
@@ -87,6 +93,19 @@ type BatchConn interface {
 	Close() error
 }
 
+type idintKeyProvider interface {
+	GetASHostKey(validTime time.Time, dstIA addr.IA, dstAddr addr.Host) (drkey.Key, error)
+	SetDialer(dialer libgrpc.TCPDialer)
+	RunPrefetcher() error
+	CancelAll()
+}
+
+type idintIfMetrics struct {
+	BytesTotal     atomic.Uint64
+	PacketsTotal   atomic.Uint64
+	PacketsDropped atomic.Uint64
+}
+
 // DataPlane contains a SCION Border Router's forwarding logic. It reads packets
 // from multiple sockets, performs routing, and sends them to their destinations
 // (after updating the path, if that is needed).
@@ -94,6 +113,7 @@ type DataPlane struct {
 	interfaces          map[uint16]BatchConn
 	external            map[uint16]BatchConn
 	linkTypes           map[uint16]topology.LinkType
+	linkSpeedBps        map[uint16]uint64
 	neighborIAs         map[uint16]addr.IA
 	peerInterfaces      map[uint16]uint16
 	internal            BatchConn
@@ -103,14 +123,21 @@ type DataPlane struct {
 	macFactory          func() hash.Hash
 	bfdSessions         map[uint16]bfdSession
 	localIA             addr.IA
+	routerID            uint32
 	mtx                 sync.Mutex
 	running             bool
 	Metrics             *Metrics
 	forwardingMetrics   map[uint16]interfaceMetrics
+	intIgrMetrics       map[uint16]*idintIfMetrics
+	intEgrMetrics       map[uint16]*idintIfMetrics
+	intIgrMeters        map[uint16]*linkMeter
+	intEgrMeters        map[uint16]*linkMeter
 	dispatchedPortStart uint16
 	dispatchedPortEnd   uint16
 
 	ExperimentalSCMPAuthentication bool
+	ExperimentalIDINT              bool
+	IdintKeyProvider               idintKeyProvider
 
 	// The pool that stores all the packet buffers as described in the design document. See
 	// https://github.com/scionproto/scion/blob/master/doc/dev/design/BorderRouter.rst
@@ -157,8 +184,8 @@ type drkeyProvider interface {
 	) (drkey.ASHostKey, error)
 }
 
-// SetIA sets the local IA for the dataplane.
-func (d *DataPlane) SetIA(ia addr.IA) error {
+// SetIA sets the local IA and router ID for the dataplane.
+func (d *DataPlane) SetIA(ia addr.IA, id uint32) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.running {
@@ -171,6 +198,7 @@ func (d *DataPlane) SetIA(ia addr.IA) error {
 		return alreadySet
 	}
 	d.localIA = ia
+	d.routerID = id
 	return nil
 }
 
@@ -208,7 +236,7 @@ func (d *DataPlane) SetPortRange(start, end uint16) {
 // send/receive traffic in the local AS. This can only be called once; future
 // calls will return an error. This can only be called on a not yet running
 // dataplane.
-func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr) error {
+func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr, speed uint64) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.running {
@@ -226,6 +254,10 @@ func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr) error {
 	d.interfaces[0] = conn
 	d.internal = conn
 	d.internalIP = ip
+	if d.linkSpeedBps == nil {
+		d.linkSpeedBps = make(map[uint16]uint64)
+	}
+	d.linkSpeedBps[0] = speed
 	return nil
 }
 
@@ -233,7 +265,7 @@ func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr) error {
 // If a connection for the given ID is already set this method will return an
 // error. This can only be called on a not yet running dataplane.
 func (d *DataPlane) AddExternalInterface(ifID uint16, conn BatchConn,
-	src, dst control.LinkEnd, cfg control.BFD) error {
+	src, dst control.LinkEnd, info control.LinkInfo) error {
 
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
@@ -244,7 +276,7 @@ func (d *DataPlane) AddExternalInterface(ifID uint16, conn BatchConn,
 	if conn == nil || src.Addr == nil || dst.Addr == nil {
 		return emptyValue
 	}
-	err := d.addExternalInterfaceBFD(ifID, conn, src, dst, cfg)
+	err := d.addExternalInterfaceBFD(ifID, conn, src, dst, info.BFD)
 	if err != nil {
 		return serrors.WrapStr("adding external BFD", err, "if_id", ifID)
 	}
@@ -259,6 +291,10 @@ func (d *DataPlane) AddExternalInterface(ifID uint16, conn BatchConn,
 	}
 	d.interfaces[ifID] = conn
 	d.external[ifID] = conn
+	if d.linkSpeedBps == nil {
+		d.linkSpeedBps = make(map[uint16]uint64)
+	}
+	d.linkSpeedBps[ifID] = info.Speed
 	return nil
 }
 
@@ -509,6 +545,21 @@ func (d *DataPlane) Run(ctx context.Context, cfg *RunConfig) error {
 	d.initPacketPool(cfg, processorQueueSize)
 	procQs, fwQs, slowQs := initQueues(cfg, d.interfaces, processorQueueSize)
 
+	d.IdintKeyProvider.SetDialer(libgrpc.TCPDialer{
+		SvcResolver: func(dst addr.SVC) []resolver.Address {
+			if base := dst.Base(); base != addr.SvcCS {
+				panic("Unsupported address type, implementation error?")
+			}
+			targets := []resolver.Address{}
+			if srv, ok := d.svc.Any(dst); ok {
+				targets = append(targets, resolver.Address{Addr: srv.String()})
+			}
+			return targets
+		},
+	})
+	d.IdintKeyProvider.RunPrefetcher()
+	defer d.IdintKeyProvider.CancelAll()
+
 	for ifID, conn := range d.interfaces {
 		go func(ifID uint16, conn BatchConn) {
 			defer log.HandlePanic()
@@ -592,8 +643,19 @@ type packet struct {
 	// The type of traffic. This is used for metrics at the forwarding stage, but is most
 	// economically determined at the processing stage. So transport it here.
 	trafficType trafficType
+	// Packet ingress timestamp
+	ingressTS time.Time
 	// The goods
 	rawPacket []byte
+}
+
+// Input packet metadata to fast path processor.
+type packetMeta struct {
+	srcAddr   *net.UDPAddr
+	ingressID uint16
+	ingressTS time.Time
+	qid       int
+	queueLen  int
 }
 
 type slowPacket struct {
@@ -620,31 +682,38 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 	msgs := underlayconn.NewReadMessages(cfg.BatchSize)
 	numReusable := 0                     // unused buffers from previous loop
 	metrics := d.forwardingMetrics[ifID] // If receiver exists, fw metrics exist too.
+	intMetrics := d.intIgrMetrics[ifID]
+	intMeter := d.intIgrMeters[ifID]
 
-	enqueueForProcessing := func(pkt ipv4.Message) {
+	enqueueForProcessing := func(pkt ipv4.Message, ingressTS time.Time) {
 		srcAddr := pkt.Addr.(*net.UDPAddr)
 		size := pkt.N
 		sc := classOfSize(size)
 		metrics[sc].InputPacketsTotal.Inc()
 		metrics[sc].InputBytesTotal.Add(float64(size))
+		intMetrics.PacketsTotal.Add(1)
+		intMetrics.BytesTotal.Add(uint64(size))
 
 		procID, err := computeProcID(pkt.Buffers[0], cfg.NumProcessors, hashSeed)
 		if err != nil {
 			log.Debug("Error while computing procID", "err", err)
 			d.returnPacketToPool(pkt.Buffers[0])
 			metrics[sc].DroppedPacketsInvalid.Inc()
+			intMetrics.PacketsDropped.Add(1)
 			return
 		}
 		outPkt := packet{
 			rawPacket: pkt.Buffers[0][:pkt.N],
 			ingress:   ifID,
 			srcAddr:   srcAddr,
+			ingressTS: ingressTS,
 		}
 		select {
 		case procQs[procID] <- outPkt:
 		default:
 			d.returnPacketToPool(pkt.Buffers[0])
 			metrics[sc].DroppedPacketsBusyProcessor.Inc()
+			intMetrics.PacketsDropped.Add(1)
 		}
 	}
 
@@ -662,10 +731,15 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 			log.Debug("Error while reading batch", "interfaceID", ifID, "err", err)
 			continue
 		}
+		// TODO(lschulz): Get more precise packet ingress timestamp
+		// TODO(lschulz): Replace time.Time with something cheaper
+		t := time.Now()
+		var totalSize int
 		for _, pkt := range msgs[:numPkts] {
-			enqueueForProcessing(pkt)
+			totalSize += pkt.N
+			enqueueForProcessing(pkt, t)
 		}
-
+		intMeter.count(8*totalSize, t) // TODO(lschulz): Take outer headers into account
 	}
 }
 
@@ -704,13 +778,20 @@ func (d *DataPlane) runProcessor(id int, q <-chan packet,
 	fwQs map[uint16]chan packet, slowQ chan<- slowPacket) {
 
 	log.Debug("Initialize processor with", "id", id)
-	processor := newPacketProcessor(d)
+	processor := newPacketProcessor(d, id)
 	for d.running {
 		p, ok := <-q
 		if !ok {
 			continue
 		}
-		result, err := processor.processPkt(p.rawPacket, p.srcAddr, p.ingress)
+		meta := &packetMeta{
+			srcAddr:   p.srcAddr,
+			ingressID: p.ingress,
+			ingressTS: p.ingressTS,
+			qid:       id,
+			queueLen:  len(q),
+		}
+		result, err := processor.processPkt(p.rawPacket, meta)
 
 		sc := classOfSize(len(p.rawPacket))
 		metrics := d.forwardingMetrics[p.ingress][sc]
@@ -753,7 +834,6 @@ func (d *DataPlane) runProcessor(id int, q <-chan packet,
 			d.returnPacketToPool(p.rawPacket)
 			metrics.DroppedPacketsBusyForwarder.Inc()
 		}
-
 	}
 }
 
@@ -818,6 +898,7 @@ type slowPathPacketProcessor struct {
 
 	scionLayer slayers.SCION
 	hbhLayer   slayers.HopByHopExtnSkipper
+	intLayer   slayers.IdIntSkipper
 	e2eLayer   slayers.EndToEndExtnSkipper
 	lastLayer  gopacket.DecodingLayer
 	path       *scion.Raw
@@ -862,7 +943,7 @@ func (p *slowPathPacketProcessor) processPacket(pkt slowPacket) (processResult, 
 	p.srcAddr = pkt.srcAddr
 	p.rawPkt = pkt.rawPacket
 
-	p.lastLayer, err = decodeLayers(pkt.rawPacket, &p.scionLayer, &p.hbhLayer, &p.e2eLayer)
+	p.lastLayer, err = decodeLayers(pkt.rawPacket, &p.scionLayer, &p.hbhLayer, &p.intLayer, &p.e2eLayer)
 	if err != nil {
 		return processResult{}, err
 	}
@@ -951,6 +1032,8 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 	}
 
 	metrics := d.forwardingMetrics[ifID]
+	intMetrics := d.intEgrMetrics[ifID]
+	intMeter := d.intEgrMeters[ifID]
 
 	toWrite := 0
 	for d.running {
@@ -971,16 +1054,21 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 			written = 0
 		}
 
+		var bytesWritten int
 		updateOutputMetrics(metrics, pkts[:written])
-
+		intMetrics.PacketsTotal.Add(uint64(written))
 		for _, p := range pkts[:written] {
 			d.returnPacketToPool(p.rawPacket)
+			bytesWritten += len(p.rawPacket)
 		}
+		intMetrics.BytesTotal.Add(uint64(bytesWritten))
+		intMeter.count(8*bytesWritten, time.Now()) // TODO(lschulz): Take outer headers into account
 
 		if written != toWrite {
 			// Only one is dropped at this time. We'll retry the rest.
 			sc := classOfSize(len(pkts[written].rawPacket))
 			metrics[sc].DroppedPacketsInvalid.Inc()
+			intMetrics.PacketsDropped.Add(1)
 			d.returnPacketToPool(pkts[written].rawPacket)
 			toWrite -= (written + 1)
 			// Shift the leftovers to the head of the buffers.
@@ -1020,7 +1108,7 @@ func readUpTo(c <-chan packet, n int, needsBlocking bool, pkts []packet) int {
 	return i
 }
 
-func newPacketProcessor(d *DataPlane) *scionPacketProcessor {
+func newPacketProcessor(d *DataPlane, id int) *scionPacketProcessor {
 	p := &scionPacketProcessor{
 		d:              d,
 		buffer:         gopacket.NewSerializeBuffer(),
@@ -1036,11 +1124,13 @@ func (p *scionPacketProcessor) reset() error {
 	p.srcAddr = nil
 	p.ingressID = 0
 	//p.scionLayer // cannot easily be reset
+	p.intLayer = slayers.IDINT{}
 	p.path = nil
 	p.hopField = path.HopField{}
 	p.infoField = path.InfoField{}
 	p.effectiveXover = false
 	p.peering = false
+	p.hopIndex = 0
 	if err := p.buffer.Clear(); err != nil {
 		return serrors.WrapStr("Failed to clear buffer", err)
 	}
@@ -1053,26 +1143,45 @@ func (p *scionPacketProcessor) reset() error {
 	return nil
 }
 
-func (p *scionPacketProcessor) processPkt(rawPkt []byte,
-	srcAddr *net.UDPAddr, ingressID uint16) (processResult, error) {
+func (p *scionPacketProcessor) processPkt(rawPkt []byte, meta *packetMeta) (processResult, error) {
 
 	if err := p.reset(); err != nil {
 		return processResult{}, err
 	}
 	p.rawPkt = rawPkt
-	p.srcAddr = srcAddr
-	p.ingressID = ingressID
+	p.srcAddr = meta.srcAddr
+	p.ingressID = meta.ingressID
 
 	// parse SCION header and skip extensions;
 	var err error
-	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.hbhLayer, &p.e2eLayer)
+	p.lastLayer, err = decodeLayers(p.rawPkt, &p.scionLayer, &p.hbhLayer, &p.intLayer, &p.e2eLayer)
 	if err != nil {
 		return processResult{}, err
 	}
 
-	pld := p.lastLayer.LayerPayload()
+	res, err := p.processPath()
+	if err != nil {
+		return res, err
+	}
 
+	if p.scionLayer.NextHdr == slayers.IDINTClass {
+		growBy, err := p.processIdInt(&res, meta)
+		if err != nil {
+			return res, err
+		}
+		if growBy > 0 {
+			newPayloadLen := p.scionLayer.PayloadLen + growBy
+			binary.BigEndian.PutUint16(p.scionLayer.Contents[6:8], newPayloadLen)
+		}
+	}
+
+	return res, err
+}
+
+func (p *scionPacketProcessor) processPath() (processResult, error) {
+	pld := p.lastLayer.LayerPayload()
 	pathType := p.scionLayer.PathType
+
 	switch pathType {
 	case empty.PathType:
 		if p.lastLayer.NextLayerType() == layers.LayerTypeBFD {
@@ -1096,6 +1205,287 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	default:
 		return processResult{}, serrors.WithCtx(unsupportedPathType, "type", pathType)
 	}
+}
+
+func (p *scionPacketProcessor) processIdInt(res *processResult, meta *packetMeta) (uint16, error) {
+	// Determine whether we are the first and/or the last border router in this AS touching the packet
+	firstBr := res.TrafficType == ttIn || res.TrafficType == ttInTransit || res.TrafficType == ttBrTransit
+	lastBr := (p.scionLayer.DstIA == p.d.localIA) // next hop is the destination host
+	lastBr = lastBr || res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit
+
+	// Calculate MAC and encrypt only at the last BR before leaving the AS or
+	// delivering to the end host. We trust intra-AS links.
+	closeEntry := lastBr || (p.intLayer.AggregationMode == slayers.IdIntAgrOff)
+
+	// Check delay hops
+	if p.intLayer.DelayHops > 0 {
+		if closeEntry {
+			p.intLayer.DelayHops--
+			if _, err := p.intLayer.SerializeToSlice(p.intLayer.LayerContents()); err != nil {
+				return 0, err
+			}
+		}
+		return 0, nil
+	}
+
+	// Get AS->Host DRKey
+	var key drkey.Key
+	if closeEntry {
+		var verifIA addr.IA
+		var verifHost []byte
+		switch p.intLayer.Verifier {
+		case slayers.IdIntVerifSrc:
+			verifIA = p.scionLayer.SrcIA
+			verifHost = p.scionLayer.RawSrcAddr
+		case slayers.IdIntVerifDst:
+			verifIA = p.scionLayer.DstIA
+			verifHost = p.scionLayer.RawDstAddr
+		case slayers.IdIntVerifOther:
+			verifIA = p.intLayer.VerifIA
+			verifHost = p.intLayer.RawVerifAddr
+		default:
+			return 0, serrors.New("invalid ID-INT verifier", "verifier", p.intLayer.Verifier)
+		}
+		ip, ok := netip.AddrFromSlice(verifHost)
+		if !ok {
+			return 0, serrors.New("invalid ID-INT verifier host address", "address", verifHost)
+		}
+		var err error
+		key, err = p.d.IdintKeyProvider.GetASHostKey(time.Now(), verifIA, addr.HostIP(ip))
+		if err != nil {
+			if err == int_drkey.ErrNotReady {
+				// TODO(lschulz): If there is already a hop entry from a sibling router, remove
+				// it from the stack again, as we can't provide a valid MAC.
+				log.Debug("waiting for ID-INT key")
+				return 0, nil
+			} else {
+				return 0, err
+			}
+		}
+	}
+
+	// Parse the current top of stack
+	tos := slayers.IntStackEntry{}
+	if err := tos.DecodeFromBytes(p.intLayer.TelemetryStack); err != nil {
+		return 0, err
+	}
+	origTosLen := tos.Length()
+
+	// Prepare requested telemetry
+	metadata := p.getTelemetry(res, meta)
+
+	// Determine whether to push a new stack entry
+	var newEntry bool
+	if tos.SourceMetadata || firstBr {
+		newEntry = true
+	} else {
+		switch p.intLayer.AggregationMode {
+		case slayers.IdIntAgrOff:
+			newEntry = true
+		case slayers.IdIntAgrAS:
+			newEntry = false
+		case slayers.IdIntAgrBR:
+			newEntry = lastBr
+		case slayers.IdIntAgrRtr: // this BR can never be internal router
+			newEntry = lastBr
+		default:
+			return 0, serrors.New("invalid ID-INT aggregation mode", "mode", p.intLayer.AggregationMode)
+		}
+	}
+	// TODO(lschulz): Don't attempt merge if previous sibling router did not push telemetry data.
+
+	if newEntry {
+		// Create a new entry
+		tos = slayers.IntStackEntry{
+			Ingress:  firstBr,
+			Egress:   (res.TrafficType == ttOut || res.TrafficType == ttOutTransit || res.TrafficType == ttBrTransit),
+			HopIndex: p.hopIndex,
+		}
+		if err := tos.SetMetadata(&metadata); err != nil {
+			return 0, nil
+		}
+	} else {
+		// Update metadata in the existing entry
+		md, err := tos.GetMetadata()
+		if err != nil {
+			return 0, err
+		}
+		md.Merge(p.intLayer.AggregationFunc, &metadata)
+		if err := tos.SetMetadata(md); err != nil {
+			return 0, nil
+		}
+		tos.Egress = lastBr
+		tos.Aggregated = true
+	}
+
+	var growBy int
+	tos.Encrypted = closeEntry && p.intLayer.Encrypt
+	if newEntry {
+		growBy = tos.Length()
+	} else {
+		if origTosLen == tos.Length() {
+			// length didn't change, update in-place
+			tos.SerializeToSlice(p.intLayer.TelemetryStack)
+			growBy = 0
+		} else {
+			growBy = tos.Length() - origTosLen
+			if growBy < 0 {
+				panic("ID-INT stack entry shrinking")
+			}
+		}
+	}
+
+	var modifyStack bool
+	if p.intLayer.TrueStackLength()+growBy > (4 * int(p.intLayer.MaxStackLen)) {
+		p.intLayer.MaxLengthExceeded = true
+		modifyStack = false
+		growBy = 0
+	} else {
+		p.intLayer.StackLength += uint8(growBy / 4)
+		modifyStack = true
+	}
+
+	// Update main header in place
+	if _, err := p.intLayer.SerializeToSlice(p.intLayer.LayerContents()); err != nil {
+		return 0, err
+	}
+
+	// Insert or overwrite entry
+	if modifyStack {
+		intLayerOffset := cap(p.rawPkt) - cap(p.intLayer.Contents)
+		stackOffset := intLayerOffset + p.intLayer.Length() - p.intLayer.TrueStackLength()
+
+		if growBy > 0 {
+			p.rawPkt = p.rawPkt[:len(p.rawPkt)+growBy]
+			copy(p.rawPkt[stackOffset+growBy:], p.rawPkt[stackOffset:])
+		}
+
+		newTos := p.rawPkt[stackOffset : stackOffset+tos.Length()]
+		if !closeEntry {
+			if _, err := tos.SerializeToSlice(newTos); err != nil {
+				return 0, err
+			}
+		} else {
+			// at this point there must be at least two entries on the telemetry
+			// stack (source + current entry)
+			prevEntry := slayers.IntStackEntry{}
+			if err := prevEntry.DecodeFromBytes(p.rawPkt[stackOffset+tos.Length():]); err != nil {
+				return 0, err
+			}
+			if !p.intLayer.Encrypt {
+				if _, err := tos.SerializeToSliceMac(newTos, prevEntry.Mac, key); err != nil {
+					return 0, err
+				}
+			} else {
+				var nonce [slayers.IntNonceLen]byte
+				frand.Read(nonce[:])
+				if _, err := tos.SerializeToSliceEncrypt(newTos, prevEntry.Mac, key, nonce); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
+
+	res.OutPkt = p.rawPkt
+	return uint16(growBy), nil
+}
+
+func (p *scionPacketProcessor) getTelemetry(res *processResult, meta *packetMeta) slayers.IntMetadata {
+	md := slayers.IntMetadata{}
+
+	// Bitmap-controlled metadata
+	if p.intLayer.InstructionBitmap&slayers.IdIntNodeId != 0 {
+		md.NodeId = p.d.routerID
+		md.NodeIdValid = true
+	}
+	if p.intLayer.InstructionBitmap&slayers.IdIntNodeCnt != 0 {
+		md.NodeCnt = 1
+		md.NodeCntValid = true
+	}
+	if p.intLayer.InstructionBitmap&slayers.IdIntIgrIf != 0 {
+		md.IgrIf = p.ingressID
+		md.IgrIfValid = true
+	}
+	if p.intLayer.InstructionBitmap&slayers.IdIntEgrIf != 0 {
+		md.EgrIf = res.EgressID
+		md.EgrIfValid = true
+	}
+
+	// Instruction-controlled metadata
+	// TODO(lschulz): Get more metadata
+	for i := 0; i < 4; i++ {
+		switch p.intLayer.Instructions[i] {
+		case slayers.IdIntIZero2:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = 0
+		case slayers.IdIntIZero4:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = 0
+		case slayers.IdIntIZero6:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = 0
+		case slayers.IdIntIZero8:
+			md.InstrDataLen[i] = 8
+			md.InstrData[i] = 0
+
+		case slayers.IdIntIDeviceTypeRole:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = 0x0201
+		case slayers.IdIntISoftwareVersion:
+			// TODO(lschulz): Get version information from build system
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = ((0 << 22) | (11 << 12)) // 0.11.0
+
+		case slayers.IdIntIAsn:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = uint64(p.d.localIA.AS())
+		case slayers.IdIntIIsd:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.localIA.ISD())
+
+		case slayers.IdIntIIngressLinkRx:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(p.d.intIgrMeters[p.ingressID].utilization.Load())
+		case slayers.IdIntIEgressLinkTx:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(p.d.intEgrMeters[res.EgressID].utilization.Load())
+
+		case slayers.IdIntIQueueId:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(meta.qid)
+		case slayers.IdIntIInstQueueLen:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(meta.queueLen)
+
+		case slayers.IdIntIIngressTstamp:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = uint64(meta.ingressTS.UnixNano())
+
+		case slayers.IdIntIEgScifPktCnt:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].PacketsTotal.Load()
+		case slayers.IdIntIEgScifPktDrop:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].PacketsDropped.Load()
+		case slayers.IdIntIEgScifBytes:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intEgrMetrics[p.ingressID].BytesTotal.Load()
+
+		case slayers.IdIntIIgScifPktCnt:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].PacketsTotal.Load()
+		case slayers.IdIntIIgScifPktDrop:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].PacketsDropped.Load()
+		case slayers.IdIntIIgScifBytes:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = p.d.intIgrMetrics[res.EgressID].BytesTotal.Load()
+
+		default:
+			// no operation
+		}
+	}
+	return md
 }
 
 func (p *scionPacketProcessor) processInterBFD(oh *onehop.Path, data []byte) error {
@@ -1221,9 +1611,10 @@ type scionPacketProcessor struct {
 
 	// scionLayer is the SCION gopacket layer.
 	scionLayer slayers.SCION
+	intLayer   slayers.IDINT
 	hbhLayer   slayers.HopByHopExtnSkipper
 	e2eLayer   slayers.EndToEndExtnSkipper
-	// last is the last parsed layer, i.e. either &scionLayer, &hbhLayer or &e2eLayer
+	// last is the last parsed layer, i.e. either &scionLayer, &hbhLayer, &intLayer or &e2eLayer
 	lastLayer gopacket.DecodingLayer
 
 	// path is the raw SCION path. Will be set during processing.
@@ -1236,6 +1627,8 @@ type scionPacketProcessor struct {
 	effectiveXover bool
 	// peering indicates that the hop field being processed is a peering hop field.
 	peering bool
+	// index of the first hop field processed by this router
+	hopIndex uint8
 
 	// cachedMac contains the full 16 bytes of the MAC. Will be set during processing.
 	// For a hop performing an Xover, it is the MAC corresponding to the down segment.
@@ -1310,6 +1703,7 @@ func (p *scionPacketProcessor) parsePath() (processResult, error) {
 		// TODO(lukedirtwalker) parameter problem invalid path?
 		return processResult{}, err
 	}
+	p.hopIndex = p.path.PathMeta.CurrHF
 	return processResult{}, nil
 }
 
@@ -2563,6 +2957,10 @@ func nextHdr(layer gopacket.DecodingLayer) slayers.L4ProtocolType {
 	switch v := layer.(type) {
 	case *slayers.SCION:
 		return v.NextHdr
+	case *slayers.IDINT:
+		return v.NextHdr
+	case *slayers.IdIntSkipper:
+		return v.NextHdr
 	case *slayers.EndToEndExtnSkipper:
 		return v.NextHdr
 	case *slayers.HopByHopExtnSkipper:
@@ -2577,13 +2975,26 @@ func nextHdr(layer gopacket.DecodingLayer) slayers.L4ProtocolType {
 // forwarding.
 func (d *DataPlane) initMetrics() {
 	d.forwardingMetrics = make(map[uint16]interfaceMetrics)
+	d.intIgrMetrics = make(map[uint16]*idintIfMetrics)
+	d.intEgrMetrics = make(map[uint16]*idintIfMetrics)
+	d.intIgrMeters = make(map[uint16]*linkMeter)
+	d.intEgrMeters = make(map[uint16]*linkMeter)
 	d.forwardingMetrics[0] = newInterfaceMetrics(d.Metrics, 0, d.localIA, d.neighborIAs)
 	for id := range d.external {
 		if _, notOwned := d.internalNextHops[id]; notOwned {
 			continue
 		}
 		d.forwardingMetrics[id] = newInterfaceMetrics(d.Metrics, id, d.localIA, d.neighborIAs)
+		d.intIgrMetrics[id] = &idintIfMetrics{}
+		d.intEgrMetrics[id] = &idintIfMetrics{}
+		d.intIgrMeters[id] = newLinkMeter(d.linkSpeedBps[id])
+		d.intEgrMeters[id] = newLinkMeter(d.linkSpeedBps[id])
 	}
+
+	d.intIgrMetrics[0] = &idintIfMetrics{}
+	d.intEgrMetrics[0] = &idintIfMetrics{}
+	d.intIgrMeters[0] = newLinkMeter(d.linkSpeedBps[0])
+	d.intEgrMeters[0] = newLinkMeter(d.linkSpeedBps[0])
 
 	// Start our custom /proc/pid/stat collector to export iowait time and (in the future) other
 	// process-wide metrics that prometheus does not.

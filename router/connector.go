@@ -49,7 +49,7 @@ type Connector struct {
 var errMultiIA = serrors.New("different IA not allowed")
 
 // CreateIACtx creates the context for ISD-AS.
-func (c *Connector) CreateIACtx(ia addr.IA) error {
+func (c *Connector) CreateIACtx(ia addr.IA, routerID uint32) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("CreateIACtx", "isd_as", ia)
@@ -57,11 +57,11 @@ func (c *Connector) CreateIACtx(ia addr.IA) error {
 		return serrors.WithCtx(errMultiIA, "current", c.ia, "new", ia)
 	}
 	c.ia = ia
-	return c.DataPlane.SetIA(ia)
+	return c.DataPlane.SetIA(ia, routerID)
 }
 
 // AddInternalInterface adds the internal interface.
-func (c *Connector) AddInternalInterface(ia addr.IA, local netip.AddrPort) error {
+func (c *Connector) AddInternalInterface(ia addr.IA, local netip.AddrPort, speed uint64) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("Adding internal interface", "isd_as", ia, "local", local)
@@ -78,7 +78,7 @@ func (c *Connector) AddInternalInterface(ia addr.IA, local netip.AddrPort) error
 		IA:   ia,
 		Addr: localU,
 	})
-	return c.DataPlane.AddInternalInterface(connection, local.Addr())
+	return c.DataPlane.AddInternalInterface(connection, local.Addr(), speed)
 }
 
 // AddExternalInterface adds a link between the local and remote address.
@@ -138,7 +138,7 @@ func (c *Connector) AddExternalInterface(localIfID common.IFIDType, link control
 		return err
 	}
 
-	return c.DataPlane.AddExternalInterface(intf, connection, link.Local, link.Remote, link.BFD)
+	return c.DataPlane.AddExternalInterface(intf, connection, link.Local, link.Remote, link)
 }
 
 // AddSvc adds the service address for the given ISD-AS.

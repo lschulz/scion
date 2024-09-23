@@ -4,7 +4,9 @@ go_library(
     name = "go_default_library",
     srcs = [
         "conn.go",
+        "idint.go",
         "interface.go",
+        "key_cache.go",
         "packet.go",
         "packet_conn.go",
         "path.go",
@@ -21,6 +23,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/addr:go_default_library",
+        "//pkg/drkey:go_default_library",
         "//pkg/log:go_default_library",
         "//pkg/metrics:go_default_library",
         "//pkg/private/common:go_default_library",
@@ -36,6 +39,7 @@ go_library(
         "//private/topology:go_default_library",
         "//private/topology/underlay:go_default_library",
         "@com_github_google_gopacket//:go_default_library",
+        "@com_lukechampine_frand//:go_default_library",
     ],
 )
 

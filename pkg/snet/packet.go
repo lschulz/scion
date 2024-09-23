@@ -1,4 +1,5 @@
 // Copyright 2020 Anapaya Systems
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -371,12 +372,13 @@ func (p *Packet) Decode() error {
 	var (
 		scionLayer slayers.SCION
 		hbhLayer   slayers.HopByHopExtnSkipper
+		intLayer   slayers.IDINT
 		e2eLayer   slayers.EndToEndExtnSkipper
 		udpLayer   slayers.UDP
 		scmpLayer  slayers.SCMP
 	)
 	parser := gopacket.NewDecodingLayerParser(
-		slayers.LayerTypeSCION, &scionLayer, &hbhLayer, &e2eLayer, &udpLayer, &scmpLayer,
+		slayers.LayerTypeSCION, &scionLayer, &hbhLayer, &intLayer, &e2eLayer, &udpLayer, &scmpLayer,
 	)
 	parser.IgnoreUnsupported = true
 	decoded := make([]gopacket.LayerType, 0, 4)
@@ -411,6 +413,16 @@ func (p *Packet) Decode() error {
 		}
 	}
 	p.Path = rpath
+
+	for _, layer := range decoded {
+		if layer == slayers.LayerTypeIDINT {
+			p.Telemetry = &RawIntReport{}
+			if err := p.Telemetry.DecodeFrom(&intLayer); err != nil {
+				return serrors.WrapStr("extracting telemetry header", err)
+			}
+			break
+		}
+	}
 
 	switch l4 {
 	case slayers.LayerTypeSCIONUDP:
@@ -574,7 +586,6 @@ func (p *Packet) Serialize() error {
 
 	// XXX(roosd): Currently, this does not take the extension headers
 	// into consideration.
-	scionLayer.PayloadLen = uint16(p.Payload.length())
 
 	// At this point all the fields in the SCION header apart from the path
 	// and path type must be set already.
@@ -583,7 +594,25 @@ func (p *Packet) Serialize() error {
 	}
 
 	packetLayers = append(packetLayers, &scionLayer)
+	if p.Telemetry != nil {
+		var nextHdr slayers.L4ProtocolType
+		switch p.Payload.(type) {
+		case UDPPayload:
+			nextHdr = slayers.L4UDP
+		default:
+			nextHdr = slayers.L4SCMP
+		}
+		var intLayer slayers.IDINT
+		if err := p.Telemetry.(*IntRequest).EncodeTo(&intLayer, nextHdr, 0); err != nil {
+			return serrors.WrapStr("setting telemetry header", err)
+		}
+		packetLayers = append(packetLayers, &intLayer)
+	}
 	packetLayers = append(packetLayers, p.Payload.toLayers(&scionLayer)...)
+	if p.Telemetry != nil {
+		// FIXME(lschulz): p.Payload.toLayers() sets NextHdr to UDP
+		scionLayer.NextHdr = slayers.IDINTClass
+	}
 
 	buffer := gopacket.NewSerializeBuffer()
 	options := gopacket.SerializeOptions{
@@ -615,6 +644,8 @@ type PacketInfo struct {
 	Source SCIONAddress
 	// Path contains a SCION forwarding path. This field must not be nil.
 	Path DataplanePath
+	// IntRequest or RawIntReport
+	Telemetry IdInt
 	// Payload is the Payload of the message.
 	Payload Payload
 }

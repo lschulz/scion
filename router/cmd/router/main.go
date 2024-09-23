@@ -30,6 +30,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/private/app"
 	"github.com/scionproto/scion/private/app/launcher"
+	"github.com/scionproto/scion/private/drkey"
 	"github.com/scionproto/scion/private/service"
 	"github.com/scionproto/scion/private/topology"
 	"github.com/scionproto/scion/router"
@@ -50,6 +51,15 @@ func main() {
 }
 
 func realMain(ctx context.Context) error {
+	// if globalCfg.General.CpuProfile != "" {
+	// 	f, err := os.Create(globalCfg.General.CpuProfile)
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+	// 	pprof.StartCPUProfile(f)
+	// 	defer pprof.StopCPUProfile()
+	// }
+
 	controlConfig, err := loadControlConfig()
 	if err != nil {
 		return err
@@ -57,10 +67,17 @@ func realMain(ctx context.Context) error {
 	g, errCtx := errgroup.WithContext(ctx)
 	metrics := router.NewMetrics()
 
+	keyProvider, err := drkey.NewProvider(&globalCfg, controlConfig)
+	if err != nil {
+		return err
+	}
+
 	dp := &router.Connector{
 		DataPlane: router.DataPlane{
 			Metrics:                        metrics,
 			ExperimentalSCMPAuthentication: globalCfg.Features.ExperimentalSCMPAuthentication,
+			ExperimentalIDINT:              globalCfg.Features.ExperimentalSCMPAuthentication,
+			IdintKeyProvider:               keyProvider,
 		},
 		ReceiveBufferSize:   globalCfg.Router.ReceiveBufferSize,
 		SendBufferSize:      globalCfg.Router.SendBufferSize,

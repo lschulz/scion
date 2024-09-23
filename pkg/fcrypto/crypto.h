@@ -1,10 +1,10 @@
-// Copyright 2022 ETH Zurich
+// Copyright 2024 OVGU Magdeburg
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//   http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-syntax = "proto3";
+#ifndef INCLUDE_GUARD_CRYPTO_H
+#define INCLUDE_GUARD_CRYPTO_H
 
-option go_package = "github.com/scionproto/scion/pkg/proto/drkey";
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
-package proto.drkey.v1;
+uint32_t RandUInt32(void);
+uint64_t RandUInt64(void);
+void CBCMAC(const uint8_t* pKey, const uint8_t* pData, size_t len, uint8_t* mac);
+bool AESCTR(const uint8_t* pKey, const uint8_t* pNonce, uint8_t* pData, size_t len);
 
-enum Protocol{
-    // Generic is used to derive keys in the generic derivation scheme
-    PROTOCOL_GENERIC_UNSPECIFIED = 0;
-    // SCMP protocol
-    PROTOCOL_SCMP = 1;
-    // ID-INT protocol
-    PROTOCOL_IDINT = 2;
-    reserved 65536 to max; // only 16-bit values allowed
-}
+#endif // INCLUDE_GUARD_CRYPTO_H

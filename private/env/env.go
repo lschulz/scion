@@ -79,6 +79,7 @@ type General struct {
 	ID string `toml:"id,omitempty"`
 	// ConfigDir for loading extra files (currently, only topology.json and staticInfoConfig.json)
 	ConfigDir string `toml:"config_dir,omitempty"`
+	// CpuProfile string `toml:"cpu_profile,omitempty"`
 }
 
 // InitDefaults sets the default value for Topology if not already set.
