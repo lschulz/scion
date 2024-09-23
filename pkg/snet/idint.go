@@ -57,7 +57,7 @@ type IntRequest struct {
 	// Aggregation function for slot 1-4
 	AggregationFunc [4]uint8
 	// Metadata instruction slot 1-4
-	Instruction [4]uint8
+	Instructions [4]uint8
 	// Type of verifier
 	Verifier int
 	// Address of the verifier if not identical to packet source or destination
@@ -98,8 +98,8 @@ func (r *IntRequest) EncodeTo(
 	}
 
 	intLayer.NextHdr = nextLayer
-	intLayer.DelayHops = uint8(r.SkipHops)
-	intLayer.MaxStackLen = uint8(r.MaxStackLen / 4)
+	intLayer.DelayHops = uint8(min(max(r.SkipHops, 0), 63))
+	intLayer.MaxStackLen = uint8(min(max(r.MaxStackLen, 0), 4*255) / 4)
 
 	intLayer.InstructionBitmap = 0
 	if r.ReqNodeId {
@@ -116,7 +116,7 @@ func (r *IntRequest) EncodeTo(
 	}
 
 	intLayer.AggregationFunc = r.AggregationFunc
-	intLayer.Instruction = r.Instruction
+	intLayer.Instructions = r.Instructions
 
 	sourceData := slayers.IntMetadata{
 		NodeIdValid:  r.SourceMetadata.HasNodeId(),
@@ -166,7 +166,7 @@ func (r *IntRequest) DecodeFrom(intLayer *slayers.IDINT) error {
 	r.ReqEgressIf = (intLayer.InstructionBitmap & slayers.IdIntEgrIf) != 0
 	r.AggregationMode = int(intLayer.AggregationMode)
 	r.AggregationFunc = intLayer.AggregationFunc
-	r.Instruction = intLayer.Instruction
+	r.Instructions = intLayer.Instructions
 
 	r.Verifier = int(intLayer.Verifier)
 	if r.Verifier == slayers.IdIntVerifOther {
@@ -279,8 +279,9 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 // report contains encrypted data.
 func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
 	report.MaxLengthExceeded = r.header.MaxLengthExceeded
+	report.SourceTS = r.header.SourceTsPort >> 16
 	report.AggregationFunc = r.header.AggregationFunc
-	report.Instruction = r.header.Instruction
+	report.Instructions = r.header.Instructions
 
 	report.Data = report.Data[:0]
 	for i := len(r.stack) - 1; i >= 0; i-- {
@@ -312,8 +313,9 @@ func (r *RawIntReport) VerifyAndDecrypt(
 	hopToIA HopToIA,
 ) error {
 	report.MaxLengthExceeded = r.header.MaxLengthExceeded
+	report.SourceTS = r.header.SourceTsPort >> 16
 	report.AggregationFunc = r.header.AggregationFunc
-	report.Instruction = r.header.Instruction
+	report.Instructions = r.header.Instructions
 
 	// Get source timestamp
 	now := time.Now()
@@ -365,6 +367,7 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 	var mac [slayers.IntMacLen]byte
 	var err error
 
+	encMac := entry.Mac // the encrypted MAC is used for chaining
 	if entry.SourceMetadata {
 		mac, err = entry.DecryptSource(key, &r.header)
 		if err != nil {
@@ -380,7 +383,7 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 		return serrors.New("telemetry MAC verification failed",
 			"expected", mac, "actual", entry.Mac[:])
 	}
-	copy(prevMac[:], mac[:])
+	copy(prevMac[:], encMac[:])
 
 	return nil
 }
@@ -432,12 +435,14 @@ func compareMACs(a []byte, b []byte) bool {
 type IntReport struct {
 	// Whether metadata was omitted because the maximum stack length was reached
 	MaxLengthExceeded bool
+	// Source timestmap
+	SourceTS uint64
 	// Requested metadata aggregation mode
 	AggregationMode int
 	// Aggregation function for slot 1-4
 	AggregationFunc [4]uint8
 	// Metadata instruction slot 1-4
-	Instruction [4]uint8
+	Instructions [4]uint8
 	// Telemetry data in path order (source to destination)
 	Data []IntHop
 }

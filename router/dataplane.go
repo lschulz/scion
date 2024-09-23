@@ -113,6 +113,7 @@ type DataPlane struct {
 	interfaces          map[uint16]BatchConn
 	external            map[uint16]BatchConn
 	linkTypes           map[uint16]topology.LinkType
+	linkSpeedBps        map[uint16]uint64
 	neighborIAs         map[uint16]addr.IA
 	peerInterfaces      map[uint16]uint16
 	internal            BatchConn
@@ -129,16 +130,14 @@ type DataPlane struct {
 	forwardingMetrics   map[uint16]interfaceMetrics
 	intIgrMetrics       map[uint16]*idintIfMetrics
 	intEgrMetrics       map[uint16]*idintIfMetrics
+	intIgrMeters        map[uint16]*linkMeter
+	intEgrMeters        map[uint16]*linkMeter
 	dispatchedPortStart uint16
 	dispatchedPortEnd   uint16
 
 	ExperimentalSCMPAuthentication bool
 	ExperimentalIDINT              bool
-	// keyCache KeyCache
-	// keyPrefetchKeeper Level1ARC
-	// prefetcher Prefetcher
-	// prefetcherTask *periodic.Task
-	IdintKeyProvider idintKeyProvider
+	IdintKeyProvider               idintKeyProvider
 
 	// The pool that stores all the packet buffers as described in the design document. See
 	// https://github.com/scionproto/scion/blob/master/doc/dev/design/BorderRouter.rst
@@ -237,7 +236,7 @@ func (d *DataPlane) SetPortRange(start, end uint16) {
 // send/receive traffic in the local AS. This can only be called once; future
 // calls will return an error. This can only be called on a not yet running
 // dataplane.
-func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr) error {
+func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr, speed uint64) error {
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
 	if d.running {
@@ -255,6 +254,10 @@ func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr) error {
 	d.interfaces[0] = conn
 	d.internal = conn
 	d.internalIP = ip
+	if d.linkSpeedBps == nil {
+		d.linkSpeedBps = make(map[uint16]uint64)
+	}
+	d.linkSpeedBps[0] = speed
 	return nil
 }
 
@@ -262,7 +265,7 @@ func (d *DataPlane) AddInternalInterface(conn BatchConn, ip netip.Addr) error {
 // If a connection for the given ID is already set this method will return an
 // error. This can only be called on a not yet running dataplane.
 func (d *DataPlane) AddExternalInterface(ifID uint16, conn BatchConn,
-	src, dst control.LinkEnd, cfg control.BFD) error {
+	src, dst control.LinkEnd, info control.LinkInfo) error {
 
 	d.mtx.Lock()
 	defer d.mtx.Unlock()
@@ -273,7 +276,7 @@ func (d *DataPlane) AddExternalInterface(ifID uint16, conn BatchConn,
 	if conn == nil || src.Addr == nil || dst.Addr == nil {
 		return emptyValue
 	}
-	err := d.addExternalInterfaceBFD(ifID, conn, src, dst, cfg)
+	err := d.addExternalInterfaceBFD(ifID, conn, src, dst, info.BFD)
 	if err != nil {
 		return serrors.WrapStr("adding external BFD", err, "if_id", ifID)
 	}
@@ -288,6 +291,10 @@ func (d *DataPlane) AddExternalInterface(ifID uint16, conn BatchConn,
 	}
 	d.interfaces[ifID] = conn
 	d.external[ifID] = conn
+	if d.linkSpeedBps == nil {
+		d.linkSpeedBps = make(map[uint16]uint64)
+	}
+	d.linkSpeedBps[ifID] = info.Speed
 	return nil
 }
 
@@ -636,8 +643,19 @@ type packet struct {
 	// The type of traffic. This is used for metrics at the forwarding stage, but is most
 	// economically determined at the processing stage. So transport it here.
 	trafficType trafficType
+	// Packet ingress timestamp
+	ingressTS time.Time
 	// The goods
 	rawPacket []byte
+}
+
+// Input packet metadata to fast path processor.
+type packetMeta struct {
+	srcAddr   *net.UDPAddr
+	ingressID uint16
+	ingressTS time.Time
+	qid       int
+	queueLen  int
 }
 
 type slowPacket struct {
@@ -665,8 +683,9 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 	numReusable := 0                     // unused buffers from previous loop
 	metrics := d.forwardingMetrics[ifID] // If receiver exists, fw metrics exist too.
 	intMetrics := d.intIgrMetrics[ifID]
+	intMeter := d.intIgrMeters[ifID]
 
-	enqueueForProcessing := func(pkt ipv4.Message) {
+	enqueueForProcessing := func(pkt ipv4.Message, ingressTS time.Time) {
 		srcAddr := pkt.Addr.(*net.UDPAddr)
 		size := pkt.N
 		sc := classOfSize(size)
@@ -687,6 +706,7 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 			rawPacket: pkt.Buffers[0][:pkt.N],
 			ingress:   ifID,
 			srcAddr:   srcAddr,
+			ingressTS: ingressTS,
 		}
 		select {
 		case procQs[procID] <- outPkt:
@@ -711,10 +731,15 @@ func (d *DataPlane) runReceiver(ifID uint16, conn BatchConn, cfg *RunConfig,
 			log.Debug("Error while reading batch", "interfaceID", ifID, "err", err)
 			continue
 		}
+		// TODO(lschulz): Get more precise packet ingress timestamp
+		// TODO(lschulz): Replace time.Time with something cheaper
+		t := time.Now()
+		var totalSize int
 		for _, pkt := range msgs[:numPkts] {
-			enqueueForProcessing(pkt)
+			totalSize += pkt.N
+			enqueueForProcessing(pkt, t)
 		}
-
+		intMeter.count(8*totalSize, t) // TODO(lschulz): Take outer headers into account
 	}
 }
 
@@ -759,7 +784,14 @@ func (d *DataPlane) runProcessor(id int, q <-chan packet,
 		if !ok {
 			continue
 		}
-		result, err := processor.processPkt(p.rawPacket, p.srcAddr, p.ingress)
+		meta := &packetMeta{
+			srcAddr:   p.srcAddr,
+			ingressID: p.ingress,
+			ingressTS: p.ingressTS,
+			qid:       id,
+			queueLen:  len(q),
+		}
+		result, err := processor.processPkt(p.rawPacket, meta)
 
 		sc := classOfSize(len(p.rawPacket))
 		metrics := d.forwardingMetrics[p.ingress][sc]
@@ -1001,6 +1033,7 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 
 	metrics := d.forwardingMetrics[ifID]
 	intMetrics := d.intEgrMetrics[ifID]
+	intMeter := d.intEgrMeters[ifID]
 
 	toWrite := 0
 	for d.running {
@@ -1021,16 +1054,15 @@ func (d *DataPlane) runForwarder(ifID uint16, conn BatchConn, cfg *RunConfig, c 
 			written = 0
 		}
 
+		var bytesWritten int
 		updateOutputMetrics(metrics, pkts[:written])
-		intMetrics.PacketsTotal.Add(1)
-		for _, p := range pkts[:written] {
-			intMetrics.PacketsTotal.Add(1)
-			intMetrics.BytesTotal.Add(uint64(len(p.rawPacket)))
-		}
-
+		intMetrics.PacketsTotal.Add(uint64(written))
 		for _, p := range pkts[:written] {
 			d.returnPacketToPool(p.rawPacket)
+			bytesWritten += len(p.rawPacket)
 		}
+		intMetrics.BytesTotal.Add(uint64(bytesWritten))
+		intMeter.count(8*bytesWritten, time.Now()) // TODO(lschulz): Take outer headers into account
 
 		if written != toWrite {
 			// Only one is dropped at this time. We'll retry the rest.
@@ -1079,7 +1111,6 @@ func readUpTo(c <-chan packet, n int, needsBlocking bool, pkts []packet) int {
 func newPacketProcessor(d *DataPlane, id int) *scionPacketProcessor {
 	p := &scionPacketProcessor{
 		d:              d,
-		qid:            id,
 		buffer:         gopacket.NewSerializeBuffer(),
 		mac:            d.macFactory(),
 		macInputBuffer: make([]byte, max(path.MACBufferSize, libepic.MACBufferSize)),
@@ -1112,15 +1143,14 @@ func (p *scionPacketProcessor) reset() error {
 	return nil
 }
 
-func (p *scionPacketProcessor) processPkt(rawPkt []byte,
-	srcAddr *net.UDPAddr, ingressID uint16) (processResult, error) {
+func (p *scionPacketProcessor) processPkt(rawPkt []byte, meta *packetMeta) (processResult, error) {
 
 	if err := p.reset(); err != nil {
 		return processResult{}, err
 	}
 	p.rawPkt = rawPkt
-	p.srcAddr = srcAddr
-	p.ingressID = ingressID
+	p.srcAddr = meta.srcAddr
+	p.ingressID = meta.ingressID
 
 	// parse SCION header and skip extensions;
 	var err error
@@ -1135,7 +1165,7 @@ func (p *scionPacketProcessor) processPkt(rawPkt []byte,
 	}
 
 	if p.scionLayer.NextHdr == slayers.IDINTClass {
-		growBy, err := p.processIdInt(&res)
+		growBy, err := p.processIdInt(&res, meta)
 		if err != nil {
 			return res, err
 		}
@@ -1177,7 +1207,7 @@ func (p *scionPacketProcessor) processPath() (processResult, error) {
 	}
 }
 
-func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) {
+func (p *scionPacketProcessor) processIdInt(res *processResult, meta *packetMeta) (uint16, error) {
 	// Determine whether we are the first and/or the last border router in this AS touching the packet
 	firstBr := res.TrafficType == ttIn || res.TrafficType == ttInTransit || res.TrafficType == ttBrTransit
 	lastBr := (p.scionLayer.DstIA == p.d.localIA) // next hop is the destination host
@@ -1242,7 +1272,7 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 	origTosLen := tos.Length()
 
 	// Prepare requested telemetry
-	metadata := p.getTelemetry(res)
+	metadata := p.getTelemetry(res, meta)
 
 	// Determine whether to push a new stack entry
 	var newEntry bool
@@ -1360,7 +1390,7 @@ func (p *scionPacketProcessor) processIdInt(res *processResult) (uint16, error) 
 	return uint16(growBy), nil
 }
 
-func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetadata {
+func (p *scionPacketProcessor) getTelemetry(res *processResult, meta *packetMeta) slayers.IntMetadata {
 	md := slayers.IntMetadata{}
 
 	// Bitmap-controlled metadata
@@ -1384,7 +1414,7 @@ func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetad
 	// Instruction-controlled metadata
 	// TODO(lschulz): Get more metadata
 	for i := 0; i < 4; i++ {
-		switch p.intLayer.Instruction[i] {
+		switch p.intLayer.Instructions[i] {
 		case slayers.IdIntIZero2:
 			md.InstrDataLen[i] = 2
 			md.InstrData[i] = 0
@@ -1398,6 +1428,14 @@ func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetad
 			md.InstrDataLen[i] = 8
 			md.InstrData[i] = 0
 
+		case slayers.IdIntIDeviceTypeRole:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = 0x0201
+		case slayers.IdIntISoftwareVersion:
+			// TODO(lschulz): Get version information from build system
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = ((0 << 22) | (11 << 12)) // 0.11.0
+
 		case slayers.IdIntIAsn:
 			md.InstrDataLen[i] = 6
 			md.InstrData[i] = uint64(p.d.localIA.AS())
@@ -1405,9 +1443,23 @@ func (p *scionPacketProcessor) getTelemetry(res *processResult) slayers.IntMetad
 			md.InstrDataLen[i] = 2
 			md.InstrData[i] = uint64(p.d.localIA.ISD())
 
+		case slayers.IdIntIIngressLinkRx:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(p.d.intIgrMeters[p.ingressID].utilization.Load())
+		case slayers.IdIntIEgressLinkTx:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(p.d.intEgrMeters[res.EgressID].utilization.Load())
+
 		case slayers.IdIntIQueueId:
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = uint64(p.qid)
+			md.InstrData[i] = uint64(meta.qid)
+		case slayers.IdIntIInstQueueLen:
+			md.InstrDataLen[i] = 4
+			md.InstrData[i] = uint64(meta.queueLen)
+
+		case slayers.IdIntIIngressTstamp:
+			md.InstrDataLen[i] = 6
+			md.InstrData[i] = uint64(meta.ingressTS.UnixNano())
 
 		case slayers.IdIntIEgScifPktCnt:
 			md.InstrDataLen[i] = 6
@@ -1543,8 +1595,7 @@ func (p *scionPacketProcessor) processEPIC() (processResult, error) {
 // mutable state and context information which should be reused.
 type scionPacketProcessor struct {
 	// d is a reference to the dataplane instance that initiated this processor.
-	d   *DataPlane
-	qid int
+	d *DataPlane
 	// ingressID is the interface ID this packet came in, determined from the
 	// socket.
 	ingressID uint16
@@ -2926,6 +2977,8 @@ func (d *DataPlane) initMetrics() {
 	d.forwardingMetrics = make(map[uint16]interfaceMetrics)
 	d.intIgrMetrics = make(map[uint16]*idintIfMetrics)
 	d.intEgrMetrics = make(map[uint16]*idintIfMetrics)
+	d.intIgrMeters = make(map[uint16]*linkMeter)
+	d.intEgrMeters = make(map[uint16]*linkMeter)
 	d.forwardingMetrics[0] = newInterfaceMetrics(d.Metrics, 0, d.localIA, d.neighborIAs)
 	for id := range d.external {
 		if _, notOwned := d.internalNextHops[id]; notOwned {
@@ -2934,10 +2987,14 @@ func (d *DataPlane) initMetrics() {
 		d.forwardingMetrics[id] = newInterfaceMetrics(d.Metrics, id, d.localIA, d.neighborIAs)
 		d.intIgrMetrics[id] = &idintIfMetrics{}
 		d.intEgrMetrics[id] = &idintIfMetrics{}
+		d.intIgrMeters[id] = newLinkMeter(d.linkSpeedBps[id])
+		d.intEgrMeters[id] = newLinkMeter(d.linkSpeedBps[id])
 	}
 
 	d.intIgrMetrics[0] = &idintIfMetrics{}
 	d.intEgrMetrics[0] = &idintIfMetrics{}
+	d.intIgrMeters[0] = newLinkMeter(d.linkSpeedBps[0])
+	d.intEgrMeters[0] = newLinkMeter(d.linkSpeedBps[0])
 
 	// Start our custom /proc/pid/stat collector to export iowait time and (in the future) other
 	// process-wide metrics that prometheus does not.

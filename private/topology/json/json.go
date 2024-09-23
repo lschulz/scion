@@ -93,9 +93,10 @@ type ServerInfo struct {
 
 // BRInfo contains Border Router specific information.
 type BRInfo struct {
-	ID           uint32                           `json:"id"`
-	InternalAddr string                           `json:"internal_addr"`
-	Interfaces   map[common.IFIDType]*BRInterface `json:"interfaces"`
+	ID            uint32                           `json:"id"`
+	InternalSpeed uint64                           `json:"internal_speed"`
+	InternalAddr  string                           `json:"internal_addr"`
+	Interfaces    map[common.IFIDType]*BRInterface `json:"interfaces"`
 }
 
 // GatewayInfo contains SCION gateway information.
@@ -113,6 +114,7 @@ type BRInterface struct {
 	IA         string          `json:"isd_as"`
 	LinkTo     string          `json:"link_to"`
 	MTU        int             `json:"mtu"`
+	Speed      uint64          `json:"speed"`
 	BFD        *BFD            `json:"bfd,omitempty"`
 	RemoteIFID common.IFIDType `json:"remote_interface_id,omitempty"`
 }

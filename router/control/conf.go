@@ -32,7 +32,7 @@ import (
 // by this controller.
 type Dataplane interface {
 	CreateIACtx(ia addr.IA, routerID uint32) error
-	AddInternalInterface(ia addr.IA, local netip.AddrPort) error
+	AddInternalInterface(ia addr.IA, local netip.AddrPort, speed uint64) error
 	AddExternalInterface(localIfID common.IFIDType, info LinkInfo, owned bool) error
 	AddSvc(ia addr.IA, svc addr.SVC, a *net.UDPAddr) error
 	DelSvc(ia addr.IA, svc addr.SVC, a *net.UDPAddr) error
@@ -52,6 +52,7 @@ type LinkInfo struct {
 	LinkTo   topology.LinkType
 	BFD      BFD
 	MTU      int
+	Speed    uint64
 }
 
 // LinkEnd represents one end of a link.
@@ -133,7 +134,7 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 	// Add internal interfaces
 	if cfg.BR != nil {
 		if cfg.BR.InternalAddr != (netip.AddrPort{}) {
-			if err := dp.AddInternalInterface(cfg.IA, cfg.BR.InternalAddr); err != nil {
+			if err := dp.AddInternalInterface(cfg.IA, cfg.BR.InternalAddr, cfg.BR.InternalSpeed); err != nil {
 				return err
 			}
 		}
@@ -193,6 +194,7 @@ func confExternalInterfaces(dp Dataplane, cfg *Config) error {
 			BFD:      BFD(iface.BFD),
 			LinkTo:   iface.LinkType,
 			MTU:      iface.MTU,
+			Speed:    iface.Speed,
 		}
 
 		_, owned := cfg.BR.IFs[ifid]

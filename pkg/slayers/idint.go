@@ -181,7 +181,7 @@ type IDINT struct {
 	// Aggregation function for meatdata 1-4
 	AggregationFunc [4]uint8
 	// Metadata instruction 1-4
-	Instruction [4]uint8
+	Instructions [4]uint8
 	// INT source timestamp and egress port. Used as input to DRKey.
 	SourceTsPort uint64
 	// Verifier address
@@ -240,10 +240,10 @@ func (i *IDINT) SerializeToSlice(buf []byte) (int, error) {
 	binary.BigEndian.PutUint32(buf[4:8], secondLine)
 
 	// Instructions
-	buf[8] = i.Instruction[0]
-	buf[9] = i.Instruction[1]
-	buf[10] = i.Instruction[2]
-	buf[11] = i.Instruction[3]
+	buf[8] = i.Instructions[0]
+	buf[9] = i.Instructions[1]
+	buf[10] = i.Instructions[2]
+	buf[11] = i.Instructions[3]
 
 	// Timestamp
 	binary.BigEndian.PutUint64(buf[12:20], i.SourceTsPort)
@@ -324,10 +324,10 @@ func (i *IDINT) DecodeFromBytes(data []byte, df gopacket.DecodeFeedback) error {
 	i.AggregationFunc[3] = uint8(secondLine & 0x7)
 
 	// Instructions
-	i.Instruction[0] = data[8]
-	i.Instruction[1] = data[9]
-	i.Instruction[2] = data[10]
-	i.Instruction[3] = data[11]
+	i.Instructions[0] = data[8]
+	i.Instructions[1] = data[9]
+	i.Instructions[2] = data[10]
+	i.Instructions[3] = data[11]
 
 	// Tiemstamp
 	i.SourceTsPort = binary.BigEndian.Uint64(data[12:20])
@@ -640,7 +640,7 @@ func (m *IntStackEntry) SerializeToSliceEncrypt(
 
 	// Encrypt
 	const metadataOffset = 4 + IntNonceLen
-	fcrypto.AESCTR(key, m.Nonce, buf[metadataOffset:offset-IntMacLen])
+	fcrypto.AESCTR(key, m.Nonce, buf[metadataOffset:offset])
 
 	return offset, nil
 }
@@ -658,7 +658,7 @@ func (m *IntStackEntry) AuthSource(
 	}
 	copy(m.Mac[:], mac[:])
 
-	return mac, nil
+	return m.Mac, nil
 }
 
 // Authenticate and encrypt a source telemetry entry.
@@ -680,7 +680,7 @@ func (m *IntStackEntry) EncryptSource(
 	copy(m.Mac[:], mac[:])
 	m.encdecImpl(key)
 
-	return mac, nil
+	return m.Mac, nil
 }
 
 // Decrypts the metadata and MAC of a source stack entry using the nonce from
@@ -722,11 +722,11 @@ func (m *IntStackEntry) Decrypt(
 }
 
 func (m *IntStackEntry) encdecImpl(key [16]byte) {
-	// AES-CCM requires encrypting the MAC as well
+	// AES-CCM encrypts the MAC as well
 	data := append(m.Metadata, m.Mac[:]...)
 	fcrypto.AESCTR(key, m.Nonce, data)
 	m.Metadata = data[:len(m.Metadata)]
-	copy(m.Mac[:], m.Metadata[len(data)-IntMacLen:])
+	copy(m.Mac[:], data[len(m.Metadata):])
 }
 
 // Calculate telemetry MAC.
@@ -807,6 +807,7 @@ func (m *IntStackEntry) calcSourceMac(key [16]byte, intLayer *IDINT) ([IntMacLen
 	}
 
 	// Zero-out updateable fields
+	buf[0] &= 0xfc
 	buf[2] = 0
 	buf[3] = 0
 	buf[4] = 0

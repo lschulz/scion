@@ -6,6 +6,7 @@ go_library(
         "connector.go",
         "dataplane.go",
         "fnv1aCheap.go",
+        "meter.go",
         "metrics.go",
         "svc.go",
     ],
