@@ -53,6 +53,7 @@ require (
 	google.golang.org/grpc/examples v0.0.0-20240321213419-eb5828bae753
 	google.golang.org/protobuf v1.34.1
 	gopkg.in/yaml.v2 v2.4.0
+	lukechampine.com/frand v1.4.2
 	modernc.org/sqlite v1.29.9
 )
 
@@ -124,7 +125,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240509183442-62759503f434 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	lukechampine.com/frand v1.4.2 // indirect
 	modernc.org/gc/v3 v3.0.0-20240304020402-f0dba7c97c2b // indirect
 	modernc.org/libc v1.50.5 // indirect
 	modernc.org/mathutil v1.6.0 // indirect

@@ -416,8 +416,8 @@ func (p *Packet) Decode() error {
 
 	for _, layer := range decoded {
 		if layer == slayers.LayerTypeIDINT {
-			p.Telemetry = &RawIntReport{}
-			if err := p.Telemetry.DecodeFrom(&intLayer); err != nil {
+			p.Telemetry.Report = &RawIntReport{}
+			if err := p.Telemetry.Report.DecodeFrom(&intLayer); err != nil {
 				return serrors.WrapStr("extracting telemetry header", err)
 			}
 			break
@@ -594,7 +594,7 @@ func (p *Packet) Serialize() error {
 	}
 
 	packetLayers = append(packetLayers, &scionLayer)
-	if p.Telemetry != nil {
+	if p.Telemetry.Request != nil {
 		var nextHdr slayers.L4ProtocolType
 		switch p.Payload.(type) {
 		case UDPPayload:
@@ -603,13 +603,13 @@ func (p *Packet) Serialize() error {
 			nextHdr = slayers.L4SCMP
 		}
 		var intLayer slayers.IDINT
-		if err := p.Telemetry.(*IntRequest).EncodeTo(&intLayer, nextHdr, 0); err != nil {
+		if err := p.Telemetry.Request.EncodeTo(&intLayer, nextHdr, 0); err != nil {
 			return serrors.WrapStr("setting telemetry header", err)
 		}
 		packetLayers = append(packetLayers, &intLayer)
 	}
 	packetLayers = append(packetLayers, p.Payload.toLayers(&scionLayer)...)
-	if p.Telemetry != nil {
+	if p.Telemetry.Request != nil {
 		// FIXME(lschulz): p.Payload.toLayers() sets NextHdr to UDP
 		scionLayer.NextHdr = slayers.IDINTClass
 	}
@@ -631,6 +631,15 @@ func (p *Packet) Serialize() error {
 	return nil
 }
 
+// IdIntInfo contains either a telemetry request or a response. Only one of
+// request and report should be non-nli.
+type IdIntInfo struct {
+	// Telemetry request to include in the packet.
+	Request IntRequestEncoder
+	// Telemetry read from a received packet.
+	Report *RawIntReport
+}
+
 // PacketInfo contains the data needed to construct a SCION packet.
 //
 // This is a high-level structure, and can only be used to create valid
@@ -644,8 +653,8 @@ type PacketInfo struct {
 	Source SCIONAddress
 	// Path contains a SCION forwarding path. This field must not be nil.
 	Path DataplanePath
-	// IntRequest or RawIntReport
-	Telemetry IdInt
+	// ID-INT telemetry request or report.
+	Telemetry IdIntInfo
 	// Payload is the Payload of the message.
 	Payload Payload
 }

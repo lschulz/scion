@@ -31,12 +31,11 @@ import (
 // still be considered valid. In nanoseconds.
 const idintMaxAge = 60_000_000_000
 
-// IntRequest of RawIntReport for PacketInfo struct
-type IdInt interface {
-	DecodeFrom(intLayer *slayers.IDINT) error
+// ID-INT request to be encoded in a packet.
+type IntRequestEncoder interface {
+	EncodeTo(intLayer *slayers.IDINT, nextLayer slayers.L4ProtocolType, sourcePort uint16) error
 }
 
-// ID-INT request to be encoded in a packet.
 type IntRequest struct {
 	// Ask routers to encrypt telemetry data
 	Encrypt bool
@@ -189,21 +188,21 @@ func (r *IntRequest) DecodeFrom(intLayer *slayers.IDINT) error {
 // Raw ID-INT headers as received from another host. Must be decoded/decrypted
 // to an IntReport in order to be read.
 type RawIntReport struct {
-	header slayers.IDINT
-	stack  []slayers.IntStackEntry
+	Header slayers.IDINT
+	Stack  []slayers.IntStackEntry
 }
 
 // Recover the original request strict from an ID-INT header. Does not include
 // the source metadata or key.
 func (r *RawIntReport) RecoverRequest(request *IntRequest) error {
-	if err := request.DecodeFrom(&r.header); err != nil {
+	if err := request.DecodeFrom(&r.Header); err != nil {
 		return err
 	}
 	// Try to recover the original value of DelayHops from the first hop index
 	// in the telemetry stack.
-	for i := len(r.stack) - 1; i >= 0; i-- {
-		if !r.stack[i].SourceMetadata {
-			request.SkipHops = int(r.stack[i].HopIndex)
+	for i := len(r.Stack) - 1; i >= 0; i-- {
+		if !r.Stack[i].SourceMetadata {
+			request.SkipHops = int(r.Stack[i].HopIndex)
 			break
 		}
 	}
@@ -212,27 +211,27 @@ func (r *RawIntReport) RecoverRequest(request *IntRequest) error {
 
 // Length of the raw report when serialized to a packet header.
 func (r *RawIntReport) SerializedLength() int {
-	length := r.header.Length()
-	for i := range r.stack {
-		length += r.stack[i].Length()
+	length := r.Header.Length()
+	for i := range r.Stack {
+		length += r.Stack[i].Length()
 	}
 	return length
 }
 
 // Serializes the ID-INT data in its packet header format.
 func (r *RawIntReport) SerializeToSlice(buf []byte) (int, error) {
-	if len(buf) < r.header.Length() {
+	if len(buf) < r.Header.Length() {
 		return 0, serrors.New("provided buffer is too small",
-			"expected", r.header.Length(), "actual", len(buf))
+			"expected", r.Header.Length(), "actual", len(buf))
 	}
 
-	offset, err := r.header.SerializeToSlice(buf)
+	offset, err := r.Header.SerializeToSlice(buf)
 	if err != nil {
 		return offset, err
 	}
 
-	for i := range r.stack {
-		length, err := r.stack[i].SerializeToSlice(buf[offset:])
+	for i := range r.Stack {
+		length, err := r.Stack[i].SerializeToSlice(buf[offset:])
 		if err != nil {
 			return offset, err
 		}
@@ -256,13 +255,13 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 	// Copy header so we can interpret telemetry data later. Make sure our copy
 	// of the IDINT layer does not point into the original packet buffer
 	// anymore.
-	r.header = *intLayer
-	r.header.RawVerifAddr = make([]byte, len(intLayer.RawVerifAddr))
-	copy(r.header.RawVerifAddr, intLayer.RawVerifAddr)
-	r.header.TelemetryStack = nil
+	r.Header = *intLayer
+	r.Header.RawVerifAddr = make([]byte, len(intLayer.RawVerifAddr))
+	copy(r.Header.RawVerifAddr, intLayer.RawVerifAddr)
+	r.Header.TelemetryStack = nil
 
 	// Parse telemetry stack
-	r.stack = r.stack[:0]
+	r.Stack = r.Stack[:0]
 	data := intLayer.TelemetryStack
 	var entry slayers.IntStackEntry
 	for len(data) > 0 {
@@ -270,7 +269,7 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 			return err
 		}
 		data = data[entry.Length():]
-		r.stack = append(r.stack, entry)
+		r.Stack = append(r.Stack, entry)
 	}
 	return nil
 }
@@ -278,14 +277,14 @@ func (r *RawIntReport) DecodeFrom(intLayer *slayers.IDINT) error {
 // Decode the telemetry report without verifying authenticity. Fails if the
 // report contains encrypted data.
 func (r *RawIntReport) DecodeUnverified(report *IntReport) error {
-	report.MaxLengthExceeded = r.header.MaxLengthExceeded
-	report.SourceTS = r.header.SourceTsPort >> 16
-	report.AggregationFunc = r.header.AggregationFunc
-	report.Instructions = r.header.Instructions
+	report.MaxLengthExceeded = r.Header.MaxLengthExceeded
+	report.SourceTS = r.Header.SourceTsPort >> 16
+	report.AggregationFunc = r.Header.AggregationFunc
+	report.Instructions = r.Header.Instructions
 
 	report.Data = report.Data[:0]
-	for i := len(r.stack) - 1; i >= 0; i-- {
-		entry := &r.stack[i]
+	for i := len(r.Stack) - 1; i >= 0; i-- {
+		entry := &r.Stack[i]
 		if entry.Encrypted {
 			return serrors.New("no key for encrypted in-band telemetry")
 		}
@@ -312,14 +311,14 @@ func (r *RawIntReport) VerifyAndDecrypt(
 	keyProv KeyProvider,
 	hopToIA HopToIA,
 ) error {
-	report.MaxLengthExceeded = r.header.MaxLengthExceeded
-	report.SourceTS = r.header.SourceTsPort >> 16
-	report.AggregationFunc = r.header.AggregationFunc
-	report.Instructions = r.header.Instructions
+	report.MaxLengthExceeded = r.Header.MaxLengthExceeded
+	report.SourceTS = r.Header.SourceTsPort >> 16
+	report.AggregationFunc = r.Header.AggregationFunc
+	report.Instructions = r.Header.Instructions
 
 	// Get source timestamp
 	now := time.Now()
-	elapsed := (uint64(now.UnixNano()&0xffff_ffff_ffff) - (r.header.SourceTsPort >> 16))
+	elapsed := (uint64(now.UnixNano()&0xffff_ffff_ffff) - (r.Header.SourceTsPort >> 16))
 	elapsed &= 0xffff_ffff_ffff
 	ts := now.UnixNano() - int64(elapsed)
 	if elapsed > idintMaxAge {
@@ -330,15 +329,15 @@ func (r *RawIntReport) VerifyAndDecrypt(
 	// Verify metadata
 	report.Data = report.Data[:0]
 	var mac [slayers.IntMacLen]byte
-	for i := len(r.stack) - 1; i >= 0; i-- {
-		entry := &r.stack[i]
+	for i := len(r.Stack) - 1; i >= 0; i-- {
+		entry := &r.Stack[i]
 		ia, err := hopToIA(uint(entry.HopIndex))
 		if err != nil {
 			return err
 		}
 		var key drkey.Key
 		if entry.SourceMetadata {
-			key, err = keyProv.GetHostHostKey(ctx, sourceTime, source)
+			key, err = keyProv.GetHostSelfKey(ctx, sourceTime, source)
 		} else {
 			key, err = keyProv.GetASHostKey(ctx, sourceTime, ia)
 		}
@@ -369,7 +368,7 @@ func (r *RawIntReport) verifyAndDecryptEntry(
 
 	encMac := entry.Mac // the encrypted MAC is used for chaining
 	if entry.SourceMetadata {
-		mac, err = entry.DecryptSource(key, &r.header)
+		mac, err = entry.DecryptSource(key, &r.Header)
 		if err != nil {
 			return err
 		}
