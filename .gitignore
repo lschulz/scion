@@ -44,6 +44,7 @@ compile_commands.json
 #########################
 /venv/
 doc/venv/
+.venv
 
 # Docker working directory
 ##########################
