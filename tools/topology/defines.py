@@ -40,6 +40,8 @@ DEFAULT_MTU = 1500 - 20 - 8
 #: IPv6 min value
 SCION_MIN_MTU = 1280
 
+DEFAULT_BW = 10000
+
 # Default IPv6 network, our equivalent to 127.0.0.0/8
 # https://en.wikipedia.org/wiki/Unique_local_address#Definition
 DEFAULT6_MASK = "/104"

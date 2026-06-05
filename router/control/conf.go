@@ -118,7 +118,7 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 		return serrors.New("empty configuration")
 	}
 	// Set ISD-AS
-	if err := dp.CreateIACtx(cfg.IA, cfg.BR.ID); err != nil {
+	if err := dp.CreateIACtx(cfg.IA, cfg.BR.Idint.ID); err != nil {
 		return err
 	}
 	// Set Keys
@@ -134,7 +134,8 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 	// Add internal interfaces
 	if cfg.BR != nil {
 		if cfg.BR.InternalAddr != (netip.AddrPort{}) {
-			if err := dp.AddInternalInterface(cfg.IA, cfg.BR.InternalAddr, cfg.BR.InternalSpeed); err != nil {
+			err := dp.AddInternalInterface(cfg.IA, cfg.BR.InternalAddr, cfg.BR.Idint.InternalSpeed)
+			if err != nil {
 				return err
 			}
 		}
@@ -194,7 +195,7 @@ func confExternalInterfaces(dp Dataplane, cfg *Config) error {
 			BFD:      BFD(iface.BFD),
 			LinkTo:   iface.LinkType,
 			MTU:      iface.MTU,
-			Speed:    iface.Speed,
+			Speed:    iface.Idint.Speed,
 		}
 
 		_, owned := cfg.BR.IFs[ifid]

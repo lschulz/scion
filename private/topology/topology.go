@@ -92,16 +92,21 @@ type (
 	// struct.
 	BRInfo struct {
 		Name string
-		// Node ID for ID-INT
-		ID uint32
-		// Connection speed to internal network
-		InternalSpeed uint64
 		// InternalAddr is the local data-plane address.
 		InternalAddr netip.AddrPort
 		// IFIDs is a sorted list of the interface IDs.
 		IFIDs []common.IFIDType
 		// IFs is a map of interface IDs.
 		IFs map[common.IFIDType]*IFInfo
+		// ID-INT configuration
+		Idint BRInfoIdint
+	}
+
+	BRInfoIdint struct {
+		// Node ID for ID-INT
+		ID uint32
+		// Connection speed to internal network
+		InternalSpeed uint64
 	}
 
 	// IfInfoMap maps interface ids to the interface information.
@@ -121,8 +126,8 @@ type (
 		IA           addr.IA
 		LinkType     LinkType
 		MTU          int
-		Speed        uint64
 		BFD          BFD
+		Idint        IFInfoIdint
 	}
 
 	// IDAddrMap maps process IDs to their topology addresses.
@@ -145,6 +150,10 @@ type (
 		DetectMult            uint8
 		DesiredMinTxInterval  time.Duration
 		RequiredMinRxInterval time.Duration
+	}
+
+	IFInfoIdint struct {
+		Speed uint64
 	}
 )
 
@@ -270,11 +279,13 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 			return serrors.WrapStr("unable to extract underlay internal data-plane address", err)
 		}
 		brInfo := BRInfo{
-			Name:          name,
-			ID:            rawBr.ID,
-			InternalSpeed: rawBr.InternalSpeed,
-			InternalAddr:  intAddr,
-			IFs:           make(map[common.IFIDType]*IFInfo),
+			Name:         name,
+			InternalAddr: intAddr,
+			IFs:          make(map[common.IFIDType]*IFInfo),
+			Idint: BRInfoIdint{
+				ID:            rawBr.Idint.ID,
+				InternalSpeed: rawBr.Idint.InternalSpeed,
+			},
 		}
 		for ifid, rawIntf := range rawBr.Interfaces {
 			var err error
@@ -288,7 +299,9 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 				BRName:       name,
 				InternalAddr: intAddr,
 				MTU:          rawIntf.MTU,
-				Speed:        rawIntf.Speed,
+				Idint: IFInfoIdint{
+					Speed: rawBr.Idint.InternalSpeed,
+				},
 			}
 			if ifinfo.IA, err = addr.ParseIA(rawIntf.IA); err != nil {
 				return err

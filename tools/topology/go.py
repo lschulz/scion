@@ -127,8 +127,23 @@ class GoGenerator(object):
             'tracing': self._tracing_entry(),
             'metrics': self._metrics_entry(infra_elem, CS_PROM_PORT),
             'api': self._api_entry(infra_elem, CS_PROM_PORT+700),
-            'features': translate_features(self.args.features),
+            'features': translate_features(self.args.features)
         }
+        if self.args.idint:
+            sciond = raw_entry['api']['addr'].rsplit(':', maxsplit=1)[0].strip('[]')
+            raw_entry['drkey'] = {
+                'prefetch_entries': 10000,
+                'level1_db': {
+                    'connection': os.path.join(self.db_dir, '%s.drkey_level1.db' % name),
+                },
+                'secret_value_db': {
+                    'connection': os.path.join(self.db_dir, '%s.drkey_secret_value.db' % name),
+                },
+                'delegation': {
+                    'scmp': ["127.0.0.1", "::1", sciond],
+                    'idint': ["127.0.0.1", "::1", sciond]
+                }
+            }
         if ca:
             raw_entry['ca'] = {'mode': 'in-process'}
         return raw_entry
@@ -167,6 +182,10 @@ class GoGenerator(object):
                 'addr': socket_address_str(ip, SD_API_PORT+700),
             }
         }
+        if self.args.idint:
+            raw_entry['drkey_level2_db'] = {
+                'connection': os.path.join(self.db_dir, '%s.drkey_level2.db' % name),
+            }
         return raw_entry
 
     def generate_disp(self):

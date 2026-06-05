@@ -67,6 +67,7 @@ class TopoGenArgs(ArgsBase):
                  subnet_gen4: SubnetGenerator,
                  subnet_gen6: SubnetGenerator,
                  default_mtu: int,
+                 default_bw: int,
                  dispatched_ports: str):
         """
         :param ArgsBase args: Contains the passed command line arguments.
@@ -74,6 +75,7 @@ class TopoGenArgs(ArgsBase):
         :param SubnetGenerator subnet_gen4: The default network generator for IPv4.
         :param SubnetGenerator subnet_gen6: The default network generator for IPv6.
         :param dict default_mtu: The default mtu.
+        :param default_bw: The default link bandwidth in Mbit/s.
         """
         super().__init__(args)
         self.topo_config_dict = topo_config
@@ -82,6 +84,7 @@ class TopoGenArgs(ArgsBase):
             ADDR_TYPE_6: subnet_gen6,
         }
         self.default_mtu = default_mtu
+        self.default_bw = default_bw
         self.dispatched_ports = dispatched_ports
         self.port_gen = PortGenerator()
 
@@ -324,6 +327,11 @@ class TopoGenerator(object):
                     l_ifid: intf
                 }
             }
+            if self.args.idint:
+                self.topo_dicts[local]["border_routers"][local_br]['idint'] = {
+                    'id': len(self.topo_dicts[local]["border_routers"]),
+                    'internal_speed': 1000 * self.args.default_bw
+                }
         else:
             # There is already a BR entry, add interface
             self.topo_dicts[local]["border_routers"][local_br]['interfaces'][l_ifid] = intf
@@ -338,7 +346,14 @@ class TopoGenerator(object):
             'isd_as': str(remote),
             'link_to': link_to,
             'mtu': attrs.get('mtu', self.args.default_mtu),
+            'bfd': {
+                'disable': True
+            },
         }
+        if self.args.idint:
+            intf['idint'] = {
+                'speed': 1000 * attrs.get('bw', self.args.default_bw),
+            }
         if link_to == 'peer':
             intf['remote_interface_id'] = r_ifid
         return intf

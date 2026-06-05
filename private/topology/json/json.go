@@ -91,12 +91,17 @@ type ServerInfo struct {
 	Addr string `json:"addr"`
 }
 
+// BRInfoIdint contains a Border Router's ID-INT configuration
+type BRInfoIdint struct {
+	ID            uint32 `json:"id"`             // router ID reported by ID-INT
+	InternalSpeed uint64 `json:"internal_speed"` // speed of the internal interface
+}
+
 // BRInfo contains Border Router specific information.
 type BRInfo struct {
-	ID            uint32                           `json:"id"`
-	InternalSpeed uint64                           `json:"internal_speed"`
-	InternalAddr  string                           `json:"internal_addr"`
-	Interfaces    map[common.IFIDType]*BRInterface `json:"interfaces"`
+	InternalAddr string                           `json:"internal_addr"`
+	Interfaces   map[common.IFIDType]*BRInterface `json:"interfaces"`
+	Idint        BRInfoIdint                      `json:"idint,omitempty"`
 }
 
 // GatewayInfo contains SCION gateway information.
@@ -107,16 +112,21 @@ type GatewayInfo struct {
 	Interfaces []uint64 `json:"allow_interfaces,omitempty"`
 }
 
+// BRInterfaceIdint contains interface specific ID-INT configuration
+type BRInterfaceIdint struct {
+	Speed uint64 `json:"speed"`
+}
+
 // BRInterface contains the information for an data-plane BR socket that is external (i.e., facing
 // the neighboring AS).
 type BRInterface struct {
-	Underlay   Underlay        `json:"underlay,omitempty"`
-	IA         string          `json:"isd_as"`
-	LinkTo     string          `json:"link_to"`
-	MTU        int             `json:"mtu"`
-	Speed      uint64          `json:"speed"`
-	BFD        *BFD            `json:"bfd,omitempty"`
-	RemoteIFID common.IFIDType `json:"remote_interface_id,omitempty"`
+	Underlay         Underlay        `json:"underlay,omitempty"`
+	IA               string          `json:"isd_as"`
+	LinkTo           string          `json:"link_to"`
+	MTU              int             `json:"mtu"`
+	BFD              *BFD            `json:"bfd,omitempty"`
+	RemoteIFID       common.IFIDType `json:"remote_interface_id,omitempty"`
+	BRInterfaceIdint `json:"idint,omitempty"`
 }
 
 // Underlay is the underlay information for a BR interface.
