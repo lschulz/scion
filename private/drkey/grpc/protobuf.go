@@ -154,3 +154,43 @@ func getHostHostKeyFromReply(
 	copy(returningKey.Key[:], rep.Key)
 	return returningKey, nil
 }
+
+func level1MetaToProtoRequest(meta drkey.Level1Meta) *cppb.DRKeyIntraLevel1Request {
+	return &cppb.DRKeyIntraLevel1Request{
+		ValTime:    timestamppb.New(meta.Validity),
+		ProtocolId: drkeypb.Protocol(meta.ProtoId),
+		SrcIa:      uint64(meta.SrcIA),
+		DstIa:      uint64(meta.DstIA),
+	}
+}
+
+func getLevel1KeyFromReply(
+	meta drkey.Level1Meta,
+	rep *cppb.DRKeyIntraLevel1Response,
+) (drkey.Level1Key, error) {
+
+	err := rep.EpochBegin.CheckValid()
+	if err != nil {
+		return drkey.Level1Key{}, serrors.Wrap("invalid EpochBegin from response", err)
+	}
+	err = rep.EpochEnd.CheckValid()
+	if err != nil {
+		return drkey.Level1Key{}, serrors.Wrap("invalid EpochEnd from response", err)
+	}
+	epoch := drkey.Epoch{
+		NotBefore: rep.EpochBegin.AsTime(),
+		NotAfter:  rep.EpochEnd.AsTime(),
+	}
+	returningKey := drkey.Level1Key{
+		SrcIA:   meta.SrcIA,
+		DstIA:   meta.DstIA,
+		Epoch:   epoch,
+		ProtoId: meta.ProtoId,
+	}
+	if len(rep.Key) != 16 {
+		return drkey.Level1Key{}, serrors.New("key size in reply is not 16 bytes",
+			"len", len(rep.Key))
+	}
+	copy(returningKey.Key[:], rep.Key)
+	return returningKey, nil
+}

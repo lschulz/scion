@@ -29,6 +29,7 @@ import yaml
 # SCION
 from topology.defines import (
     DEFAULT_MTU,
+    DEFAULT_BW,
     DEFAULT6_NETWORK,
     NETWORKS_FILE,
     DEFAULT_DISPATCHED_PORTS,
@@ -88,6 +89,7 @@ class ConfigGenerator(object):
         self.subnet_gen6 = SubnetGenerator(self.args.network_v6, self.args.docker) \
             if self.args.network_v6 else SubnetGenerator(DEFAULT6_NETWORK, self.args.docker)
         self.default_mtu = defaults.get("mtu", DEFAULT_MTU)
+        self.default_bw = defaults.get("bw", DEFAULT_BW)
         self.dispatched_ports = defaults.get("dispatched_ports", DEFAULT_DISPATCHED_PORTS)
 
     def generate_all(self):
@@ -151,7 +153,7 @@ class ConfigGenerator(object):
 
     def _topo_args(self):
         return TopoGenArgs(self.args, self.topo_config, self.subnet_gen4,
-                           self.subnet_gen6, self.default_mtu,
+                           self.subnet_gen6, self.default_mtu, self.default_bw,
                            self.dispatched_ports)
 
     def _generate_supervisor(self, topo_dicts):

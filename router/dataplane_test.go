@@ -53,6 +53,7 @@ import (
 var (
 	srcUDPPort = 50001
 	dstUDPPort = 50002
+	speed      = uint64(1000_0000)
 )
 
 func TestDataPlaneAddInternalInterface(t *testing.T) {
@@ -64,22 +65,22 @@ func TestDataPlaneAddInternalInterface(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
 		d.MockStart()
-		assert.Error(t, d.AddInternalInterface(localHost, "udpip", localAddr))
+		assert.Error(t, d.AddInternalInterface(localHost, "udpip", localAddr, speed))
 	})
 	t.Run("single set works", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", localAddr))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", localAddr, speed))
 	})
 	t.Run("double set fails", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", localAddr))
-		assert.Error(t, d.AddInternalInterface(localHost, "udpip", localAddr))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", localAddr, speed))
+		assert.Error(t, d.AddInternalInterface(localHost, "udpip", localAddr, speed))
 	})
 }
 
@@ -140,7 +141,7 @@ func TestDataPlaneAddExternalInterface(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
 		d.MockStart()
-		assert.Error(t, d.AddExternalInterface(42, link1, lh, rh1))
+		assert.Error(t, d.AddExternalInterface(42, link1, lh, rh1, speed))
 	})
 	t.Run("setting blank src is not allowed", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -153,7 +154,7 @@ func TestDataPlaneAddExternalInterface(t *testing.T) {
 			Remote:   r1,
 			BFD:      nobfd,
 		}
-		assert.Error(t, d.AddExternalInterface(42, link3, lh, rh1))
+		assert.Error(t, d.AddExternalInterface(42, link3, lh, rh1, speed))
 	})
 	t.Run("setting blank dst is not allowed", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -166,7 +167,7 @@ func TestDataPlaneAddExternalInterface(t *testing.T) {
 			Remote:   control.LinkEnd{},
 			BFD:      nobfd,
 		}
-		assert.Error(t, d.AddExternalInterface(42, link3, lh, rh1))
+		assert.Error(t, d.AddExternalInterface(42, link3, lh, rh1, speed))
 	})
 	t.Run("normal add works", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -174,9 +175,9 @@ func TestDataPlaneAddExternalInterface(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
 		assert.NoError(t,
-			d.AddExternalInterface(42, link1, lh, rh1))
+			d.AddExternalInterface(42, link1, lh, rh1, speed))
 		assert.NoError(t,
-			d.AddExternalInterface(45, link2, lh, rh2))
+			d.AddExternalInterface(45, link2, lh, rh2, speed))
 	})
 	t.Run("overwrite ifID fails", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -184,9 +185,9 @@ func TestDataPlaneAddExternalInterface(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
 		assert.NoError(t,
-			d.AddExternalInterface(42, link1, lh, rh1))
+			d.AddExternalInterface(42, link1, lh, rh1, speed))
 		assert.Error(t,
-			d.AddExternalInterface(42, link2, lh, rh2))
+			d.AddExternalInterface(42, link2, lh, rh2, speed))
 	})
 	t.Run("reuse dst addr fails", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
@@ -194,9 +195,9 @@ func TestDataPlaneAddExternalInterface(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
 		assert.NoError(t,
-			d.AddExternalInterface(42, link1, lh, rh1))
+			d.AddExternalInterface(42, link1, lh, rh1, speed))
 		assert.Error(t,
-			d.AddExternalInterface(45, link1, lh, rh1))
+			d.AddExternalInterface(45, link1, lh, rh1, speed))
 	})
 }
 
@@ -258,9 +259,9 @@ func TestDataPlaneAddNextHop(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		ctrl := gomock.NewController(t)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal, speed))
 		d.MockStart()
-		assert.Error(t, d.AddNextHop(45, link1, lh, rh1))
+		assert.Error(t, d.AddNextHop(45, link1, lh, rh1, speed))
 	})
 	t.Run("setting nil src is not allowed", func(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
@@ -272,8 +273,8 @@ func TestDataPlaneAddNextHop(t *testing.T) {
 			Remote:   r1,
 			BFD:      nobfd,
 		}
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal))
-		assert.Error(t, d.AddNextHop(45, link3, lh, rh1))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal, speed))
+		assert.Error(t, d.AddNextHop(45, link3, lh, rh1, speed))
 	})
 
 	t.Run("setting nil dst is not allowed", func(t *testing.T) {
@@ -286,26 +287,26 @@ func TestDataPlaneAddNextHop(t *testing.T) {
 			Remote:   control.LinkEnd{},
 			BFD:      nobfd,
 		}
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal))
-		assert.Error(t, d.AddNextHop(45, link3, lh, rh1))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal, speed))
+		assert.Error(t, d.AddNextHop(45, link3, lh, rh1, speed))
 	})
 
 	t.Run("normal add works", func(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		ctrl := gomock.NewController(t)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal))
-		assert.NoError(t, d.AddNextHop(45, link1, lh, rh1))
-		assert.NoError(t, d.AddNextHop(43, link2, lh, rh2))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal, speed))
+		assert.NoError(t, d.AddNextHop(45, link1, lh, rh1, speed))
+		assert.NoError(t, d.AddNextHop(43, link2, lh, rh2, speed))
 	})
 
 	t.Run("overwrite fails", func(t *testing.T) {
 		d := router.NewDPRaw(router.RunConfig{}, false)
 		ctrl := gomock.NewController(t)
 		d.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl})
-		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal))
-		assert.NoError(t, d.AddNextHop(45, link1, lh, rh1))
-		assert.Error(t, d.AddNextHop(45, link2, lh, rh1))
+		assert.NoError(t, d.AddInternalInterface(localHost, "udpip", internal, speed))
+		assert.NoError(t, d.AddNextHop(45, link1, lh, rh1, speed))
+		assert.Error(t, d.AddNextHop(45, link2, lh, rh1, speed))
 	})
 }
 
@@ -353,7 +354,8 @@ func TestDataPlaneRun(t *testing.T) {
 						return len(ms), nil
 					}).AnyTimes()
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mInternal})
-				assert.NoError(t, ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"))
+				assert.NoError(t, ret.AddInternalInterface(
+					addr.Host{}, "udpip", "127.0.0.1:0", speed))
 
 				mExternal := mock_router.NewMockBatchConn(ctrl)
 				mExternal.EXPECT().ReadBatch(gomock.Any()).DoAndReturn(
@@ -416,9 +418,9 @@ func TestDataPlaneRun(t *testing.T) {
 				}
 
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mExternal})
-				assert.NoError(t, ret.AddExternalInterface(1, link, lh, rh))
+				assert.NoError(t, ret.AddExternalInterface(1, link, lh, rh, speed))
 
-				assert.NoError(t, ret.SetIA(local))
+				assert.NoError(t, ret.SetIA(local, 0))
 				assert.NoError(t, ret.SetKey(key))
 				return ret
 			},
@@ -460,7 +462,8 @@ func TestDataPlaneRun(t *testing.T) {
 				mInternal.EXPECT().ReadBatch(gomock.Any()).Return(0, nil).AnyTimes()
 				mInternal.EXPECT().WriteBatch(gomock.Any(), gomock.Any()).Return(0, nil).AnyTimes()
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mInternal})
-				assert.NoError(t, ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"))
+				assert.NoError(t, ret.AddInternalInterface(
+					addr.Host{}, "udpip", "127.0.0.1:0", speed))
 
 				mtx := sync.Mutex{}
 				expectRemoteDiscriminators := map[layers.BFDDiscriminator]struct{}{}
@@ -529,7 +532,7 @@ func TestDataPlaneRun(t *testing.T) {
 					for _, ifID := range ifIDs {
 						// Sibling links to the same sibling are de-duped, so we will only need
 						// one sibling connection for them all.
-						assert.NoError(t, ret.AddNextHop(ifID, link, lh, rh))
+						assert.NoError(t, ret.AddNextHop(ifID, link, lh, rh, speed))
 					}
 				}
 
@@ -608,8 +611,9 @@ func TestDataPlaneRun(t *testing.T) {
 				// Let the same connection be used for internal and sibling. We only send on the
 				// latter and we don't care what we receive or where.
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mInternal})
-				assert.NoError(t, ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"))
-				assert.NoError(t, ret.AddNextHop(3, link, lh, rh))
+				assert.NoError(t, ret.AddInternalInterface(
+					addr.Host{}, "udpip", "127.0.0.1:0", speed))
+				assert.NoError(t, ret.AddNextHop(3, link, lh, rh, speed))
 				return ret
 			},
 		},
@@ -679,9 +683,10 @@ func TestDataPlaneRun(t *testing.T) {
 
 				assert.NoError(t, ret.SetKey([]byte("randomkeyformacs")))
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mInternal})
-				assert.NoError(t, ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"))
+				assert.NoError(t, ret.AddInternalInterface(
+					addr.Host{}, "udpip", "127.0.0.1:0", speed))
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mExternal})
-				assert.NoError(t, ret.AddExternalInterface(ifID, link, lh, rh))
+				assert.NoError(t, ret.AddExternalInterface(ifID, link, lh, rh, speed))
 				return ret
 			},
 		},
@@ -774,9 +779,10 @@ func TestDataPlaneRun(t *testing.T) {
 
 				assert.NoError(t, ret.SetKey([]byte("randomkeyformacs")))
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mInternal})
-				assert.NoError(t, ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"))
+				assert.NoError(t, ret.AddInternalInterface(
+					addr.Host{}, "udpip", "127.0.0.1:0", speed))
 				ret.SetConnOpener("udpip", router.MockConnOpener{Ctrl: ctrl, Conn: mExternal})
-				assert.NoError(t, ret.AddExternalInterface(1, link, lh, rh))
+				assert.NoError(t, ret.AddExternalInterface(1, link, lh, rh, speed))
 				return ret
 			},
 		},

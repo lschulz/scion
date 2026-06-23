@@ -36,3 +36,8 @@ num_slow_processors = 1
 # (default 256)
 batch_size = 256
 `
+
+const drkeyConfigSample = `
+# Number of distinct Level1Keys to be prefetched.
+prefetch_entries = 10000
+`

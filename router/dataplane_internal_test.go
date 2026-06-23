@@ -53,7 +53,7 @@ var testKey = []byte("testkey_xxxxxxxx")
 // the same number of packets as the receiver received.
 func TestReceiver(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	dp := newDataPlane(RunConfig{NumProcessors: 1, BatchSize: 64}, false)
+	dp := newDataPlane(RunConfig{NumProcessors: 1, BatchSize: 64}, nil, false, false)
 	counter := 0
 	mInternal := mock_router.NewMockBatchConn(ctrl)
 	done := make(chan bool)
@@ -91,7 +91,7 @@ func TestReceiver(t *testing.T) {
 
 	dp.underlays["udpip"].SetConnOpener(MockConnOpener{Ctrl: ctrl, Conn: mInternal})
 
-	assert.NoError(t, dp.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"))
+	assert.NoError(t, dp.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0", 1000_0000))
 
 	dp.initPacketPool(64)
 	procCh, _ := dp.initQueues(64)
@@ -142,7 +142,8 @@ func TestForwarder(t *testing.T) {
 
 	prepareDP := func(ctrl *gomock.Controller) *dataPlane {
 		ret := newDataPlane(
-			RunConfig{NumProcessors: 20, BatchSize: 64, NumSlowPathProcessors: 1}, false)
+			RunConfig{NumProcessors: 20, BatchSize: 64, NumSlowPathProcessors: 1},
+			nil, false, false)
 		mConn := mock_router.NewMockBatchConn(ctrl)
 		var totalCount, expectedPktId atomic.Int32
 		closeChan := make(chan struct{})
@@ -201,7 +202,8 @@ func TestForwarder(t *testing.T) {
 
 		ret.underlays["udpip"].SetConnOpener(MockConnOpener{Ctrl: ctrl, Conn: mConn})
 
-		if err := ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0"); err != nil {
+		err := ret.AddInternalInterface(addr.Host{}, "udpip", "127.0.0.1:0", 1000_0000)
+		if err != nil {
 			panic(err)
 		}
 		l := control.LinkEnd{
@@ -221,7 +223,7 @@ func TestForwarder(t *testing.T) {
 			Remote:   r,
 			BFD:      nobfd,
 		}
-		if err := ret.AddExternalInterface(42, link, lh, rh); err != nil {
+		if err := ret.AddExternalInterface(42, link, lh, rh, 1000_0000); err != nil {
 			panic(err)
 		}
 		return ret
@@ -470,7 +472,7 @@ func TestSlowPathProcessing(t *testing.T) {
 			pkt.Link = newMockLink(tc.srcInterface)
 
 			processor := newPacketProcessor(dp)
-			disp := processor.processPkt(pkt)
+			disp := processor.processPkt(pkt, &packetMeta{})
 			assert.Equal(t, pSlowPath, disp)
 			assert.Equal(t, tc.expectedSlowPathRequest, pkt.slowPathRequest)
 			slowPathProcessor := newSlowPathProcessor(dp)

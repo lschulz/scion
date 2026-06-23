@@ -5,7 +5,9 @@ go_library(
     name = "go_default_library",
     srcs = [
         "conn.go",
+        "idint.go",
         "interface.go",
+        "key_cache.go",
         "packet.go",
         "packet_conn.go",
         "path.go",
@@ -25,6 +27,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/addr:go_default_library",
+        "//pkg/drkey:go_default_library",
         "//pkg/log:go_default_library",
         "//pkg/metrics/v2:go_default_library",
         "//pkg/private/common:go_default_library",
@@ -33,6 +36,7 @@ go_library(
         "//pkg/private/util:go_default_library",
         "//pkg/segment/iface:go_default_library",
         "//pkg/slayers:go_default_library",
+        "//pkg/slayers/idint:go_default_library",
         "//pkg/slayers/path:go_default_library",
         "//pkg/slayers/path/empty:go_default_library",
         "//pkg/slayers/path/epic:go_default_library",
@@ -42,6 +46,7 @@ go_library(
         "//private/topology:go_default_library",
         "//private/topology/underlay:go_default_library",
         "@com_github_gopacket_gopacket//:go_default_library",
+        "@com_lukechampine_frand//:go_default_library",
         "@org_golang_x_sync//singleflight:go_default_library",
     ] + select({
         "@rules_go//go/platform:windows": [
@@ -55,6 +60,7 @@ go_test(
     name = "go_default_test",
     srcs = [
         "export_test.go",
+        "idint_test.go",
         "packet_test.go",
         "svcaddr_test.go",
         "udpaddr_test.go",
@@ -63,8 +69,10 @@ go_test(
     embed = [":go_default_library"],
     deps = [
         "//pkg/addr:go_default_library",
+        "//pkg/drkey:go_default_library",
         "//pkg/private/serrors:go_default_library",
         "//pkg/slayers:go_default_library",
+        "//pkg/slayers/idint:go_default_library",
         "//pkg/slayers/path:go_default_library",
         "//pkg/slayers/path/onehop:go_default_library",
         "//pkg/slayers/path/scion:go_default_library",

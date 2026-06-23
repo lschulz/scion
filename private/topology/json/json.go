@@ -86,6 +86,12 @@ type Topology struct {
 	SIG                 map[string]*GatewayInfo `json:"sigs,omitempty"`
 }
 
+// BRInfoIdInt contains a Border Router's ID-INT configuration
+type BRInfoIdInt struct {
+	NodeId        uint32 `json:"id"`             // router ID reported by ID-INT
+	InternalSpeed uint64 `json:"internal_speed"` // speed of the internal interface
+}
+
 // ServerInfo contains the information for a SCION application running in the local AS.
 type ServerInfo struct {
 	Addr string `json:"addr"`
@@ -95,6 +101,7 @@ type ServerInfo struct {
 type BRInfo struct {
 	InternalAddr string                    `json:"internal_addr"`
 	Interfaces   map[iface.ID]*BRInterface `json:"interfaces"`
+	IdInt        BRInfoIdInt               `json:"idint,omitempty"`
 }
 
 // GatewayInfo contains SCION gateway information.
@@ -105,15 +112,21 @@ type GatewayInfo struct {
 	Interfaces []uint64 `json:"allow_interfaces,omitempty"`
 }
 
+// BRInterfaceIdint contains interface specific ID-INT configuration
+type BRInterfaceIdint struct {
+	Speed uint64 `json:"speed"`
+}
+
 // BRInterface contains the information for an data-plane BR socket that is external (i.e., facing
 // the neighboring AS).
 type BRInterface struct {
-	Underlay   Underlay `json:"underlay,omitempty"`
-	IA         string   `json:"isd_as"`
-	LinkTo     string   `json:"link_to"`
-	MTU        int      `json:"mtu"`
-	BFD        *BFD     `json:"bfd,omitempty"`
-	RemoteIfID iface.ID `json:"remote_interface_id,omitempty"`
+	Underlay   Underlay         `json:"underlay,omitempty"`
+	IA         string           `json:"isd_as"`
+	LinkTo     string           `json:"link_to"`
+	MTU        int              `json:"mtu"`
+	BFD        *BFD             `json:"bfd,omitempty"`
+	RemoteIfID iface.ID         `json:"remote_interface_id,omitempty"`
+	IdInt      BRInterfaceIdint `json:"idint,omitempty"`
 }
 
 // Underlay is the underlay information for a BR interface.
@@ -129,6 +142,8 @@ type BFD struct {
 	DetectMult            uint8        `json:"detect_mult,omitempty"`
 	DesiredMinTxInterval  util.DurWrap `json:"desired_min_tx_interval,omitempty"`
 	RequiredMinRxInterval util.DurWrap `json:"required_min_rx_interval,omitempty"`
+	DisableRTT            bool         `json:"disable_rtt,omitempty"`
+	RTTEWMAWeight         float64      `json:"rtt_ewma_weight,omitempty"`
 }
 
 func (i ServerInfo) String() string {

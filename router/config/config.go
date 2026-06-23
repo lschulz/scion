@@ -21,6 +21,7 @@ import (
 	"runtime"
 	"time"
 
+	control "github.com/scionproto/scion/control/config"
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/private/util"
@@ -38,6 +39,7 @@ type Config struct {
 	Metrics  env.Metrics  `toml:"metrics,omitempty"`
 	API      api.Config   `toml:"api,omitempty"`
 	Router   RouterConfig `toml:"router,omitempty"`
+	DRKey    DRKeyConfig  `toml:"drkey,omitempty"`
 }
 
 type RouterConfig struct {
@@ -62,6 +64,10 @@ type BFD struct {
 	DetectMult            uint8        `toml:"detect_mult,omitempty"`
 	DesiredMinTxInterval  util.DurWrap `toml:"desired_min_tx_interval,omitempty"`
 	RequiredMinRxInterval util.DurWrap `toml:"required_min_rx_interval,omitempty"`
+}
+
+type DRKeyConfig struct {
+	PrefetchEntries int `toml:"prefetch_entries,omitempty"`
 }
 
 func (cfg *RouterConfig) ConfigName() string {
@@ -151,6 +157,27 @@ func (cfg *RouterConfig) Sample(dst io.Writer, path config.Path, ctx config.CtxM
 	config.WriteString(dst, routerConfigSample)
 }
 
+func (cfg *DRKeyConfig) ConfigName() string {
+	return "drkey"
+}
+
+func (cfg *DRKeyConfig) Validate() error {
+	if cfg.PrefetchEntries < 0 {
+		return serrors.New("Provided DRKey config is invalid. PrefetchEntries < 0")
+	}
+	return nil
+}
+
+func (cfg *DRKeyConfig) InitDefaults() {
+	if cfg.PrefetchEntries == 0 {
+		cfg.PrefetchEntries = control.DefaultPrefetchEntries
+	}
+}
+
+func (cfg *DRKeyConfig) Sample(dst io.Writer, path config.Path, ctx config.CtxMap) {
+	config.WriteString(dst, drkeyConfigSample)
+}
+
 func (cfg *Config) InitDefaults() {
 	config.InitAll(
 		&cfg.General,
@@ -159,6 +186,7 @@ func (cfg *Config) InitDefaults() {
 		&cfg.Metrics,
 		&cfg.API,
 		&cfg.Router,
+		&cfg.DRKey,
 	)
 }
 
@@ -170,6 +198,7 @@ func (cfg *Config) Validate() error {
 		&cfg.Metrics,
 		&cfg.API,
 		&cfg.Router,
+		&cfg.DRKey,
 	)
 }
 
@@ -181,5 +210,6 @@ func (cfg *Config) Sample(dst io.Writer, path config.Path, _ config.CtxMap) {
 		&cfg.Metrics,
 		&cfg.API,
 		&cfg.Router,
+		&cfg.DRKey,
 	)
 }

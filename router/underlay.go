@@ -18,6 +18,7 @@ package router
 
 import (
 	"context"
+	"net/netip"
 
 	"github.com/scionproto/scion/pkg/addr"
 	"github.com/scionproto/scion/router/bfd"
@@ -53,6 +54,8 @@ type Link interface {
 	IfID() uint16
 	// Metrics returns the metrics specific to this link.
 	Metrics() *InterfaceMetrics
+	// DpMetrics returns link metrics used by ID-INT.
+	DpMetrics() *DpMetrics
 	// Scope returns the scope of this link: internal, external, or sibling.
 	Scope() LinkScope
 	// BFDSession returns the BFD session associated with this link.
@@ -106,6 +109,9 @@ type UnderlayProvider interface {
 	// DelSvc deletes the address for the given service.
 	DelSvc(svc addr.SVC, host addr.Host, port uint16) error
 
+	// AnySvc returns an underlay address for the given service.
+	AnySvc(svc addr.SVC) (netip.AddrPort, bool)
+
 	// Start puts the provider in the running state. In that state, the provider can deliver
 	// incoming packets to its output channels and will send packets present on its input
 	// channels. Only connection in existence at the time of calling Start() will be
@@ -129,6 +135,7 @@ type UnderlayProvider interface {
 		remote string,
 		ifID uint16,
 		metrics *InterfaceMetrics,
+		dpMetrics *DpMetrics,
 	) (Link, error)
 
 	// NewSiblingLink returns a link that addresses any number of remote ASes via a single sibling
@@ -141,12 +148,18 @@ type UnderlayProvider interface {
 		local string,
 		remote string,
 		metrics *InterfaceMetrics,
+		dpMetrics *DpMetrics,
 	) (Link, error)
 
 	// NewInternalLink returns a link that addresses any host internal to the enclosing AS, so it is
 	// given neither ifID nor remote address. Outgoing packets need to have a destination address as
 	// metadata. Incoming packets have no defined ingress ifID.
-	NewInternalLink(localAddr string, qSize int, metrics *InterfaceMetrics) (Link, error)
+	NewInternalLink(
+		localAddr string,
+		qSize int,
+		metrics *InterfaceMetrics,
+		dpMetrics *DpMetrics,
+	) (Link, error)
 }
 
 // NewProviderFn is a function that instantiates an underlay provider.

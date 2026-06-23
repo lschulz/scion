@@ -33,6 +33,7 @@ import (
 const (
 	Generic = Protocol(pb.Protocol_PROTOCOL_GENERIC_UNSPECIFIED)
 	SCMP    = Protocol(pb.Protocol_PROTOCOL_SCMP)
+	IDINT   = Protocol(pb.Protocol_PROTOCOL_IDINT)
 
 	GRACE_PERIOD = 5 * time.Second
 )

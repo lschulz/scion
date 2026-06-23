@@ -99,6 +99,15 @@ type (
 		IfIDs []iface.ID
 		// IFs is a map of interface IDs.
 		IFs map[iface.ID]*IFInfo
+		// ID-INT configuration
+		IdInt BRInfoIdInt
+	}
+
+	BRInfoIdInt struct {
+		// Node ID for ID-INT
+		NodeId uint32
+		// Connection speed to internal network
+		InternalSpeed uint64
 	}
 
 	// IfInfoMap maps interface ids to the interface information.
@@ -128,6 +137,7 @@ type (
 		LinkType     LinkType       // (Child, Parent, Core or Peering)
 		MTU          int            // of the link (configured - could be wrong and needs update)
 		BFD          BFD            // (configuration of)
+		IdInt        IFInfoIdint    // (configuration of)
 	}
 
 	// IDAddrMap maps process IDs to their topology addresses.
@@ -150,6 +160,12 @@ type (
 		DetectMult            uint8
 		DesiredMinTxInterval  time.Duration
 		RequiredMinRxInterval time.Duration
+		DisableRTT            bool
+		RTTEWMAWeight         float64
+	}
+
+	IFInfoIdint struct {
+		Speed uint64
 	}
 )
 
@@ -278,6 +294,10 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 			Name:         name,
 			InternalAddr: intAddr,
 			IFs:          make(map[iface.ID]*IFInfo),
+			IdInt: BRInfoIdInt{
+				NodeId:        rawBr.IdInt.NodeId,
+				InternalSpeed: rawBr.IdInt.InternalSpeed,
+			},
 		}
 		for ifID, rawIntf := range rawBr.Interfaces {
 			var err error
@@ -291,6 +311,9 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 				BRName:       name,
 				InternalAddr: intAddr,
 				MTU:          rawIntf.MTU,
+				IdInt: IFInfoIdint{
+					Speed: rawIntf.IdInt.Speed,
+				},
 			}
 			if ifinfo.IA, err = addr.ParseIA(rawIntf.IA); err != nil {
 				return err
@@ -309,6 +332,8 @@ func (t *RWTopology) populateBR(raw *jsontopo.Topology) error {
 					DetectMult:            bfd.DetectMult,
 					DesiredMinTxInterval:  bfd.DesiredMinTxInterval.Duration,
 					RequiredMinRxInterval: bfd.RequiredMinRxInterval.Duration,
+					DisableRTT:            bfd.DisableRTT,
+					RTTEWMAWeight:         bfd.RTTEWMAWeight,
 				}
 			}
 

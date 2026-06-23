@@ -1,3 +1,35 @@
+# Fork of SCION with support for ID-INT
+
+This work of [Scionproto/SCION](https://github.com/scionproto/scion) adds support for In-band
+Inter-domain Network Telemetry (ID-INT) to the border router and snet library.
+
+Currently only builds for AMD64 architectures with support for AES-NI.
+
+ID-INT Specification: https://github.com/netsys-lab/id-int-spec
+
+[Publication:](https://ieeexplore.ieee.org/document/10814310)
+```
+L.-C. Schulz and D. Hausheer, "ID-INT: Secure Inter-Domain In-Band Telemetry," 2024 20th International Conference on Network and Service Management (CNSM), Prague, Czech Republic, 2024, doi: 10.23919/CNSM62983.2024.10814310.
+```
+
+## Usage
+The ID-INT border router is a drop-in replacement for existing SCION routers. ID-INT depends on
+DRKey, so in order to use it DRKey must be configured in the control service. You can generate an
+example configuration by running a SCION network on your local machine.
+
+```bash
+./scion.sh topology -c topology/default.topo --features experimental_idint
+```
+
+The feature flag `experimental_idint` causes an ID-INT-compatible topology to be generated.
+
+## Programs using ID-INT
+* [idint-traceroute](https://github.com/netsys-lab/idint-traceroute)
+
+----------------
+
+Original SCION README below.
+
 # SCION
 
 [![Slack chat](https://img.shields.io/badge/chat%20on-slack-blue?logo=slack)](https://scionproto.slack.com)

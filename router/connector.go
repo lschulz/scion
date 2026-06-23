@@ -21,6 +21,7 @@ import (
 	"github.com/scionproto/scion/pkg/log"
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/pkg/segment/iface"
+	prv_drkey "github.com/scionproto/scion/private/drkey"
 	"github.com/scionproto/scion/private/env"
 	"github.com/scionproto/scion/router/config"
 	"github.com/scionproto/scion/router/control"
@@ -48,7 +49,11 @@ var errMultiIA = serrors.New("different IA not allowed")
 
 // NewConnector returns a new connector: a data plane decorated with
 // a configuration interface.
-func NewConnector(config config.RouterConfig, features env.Features) *Connector {
+func NewConnector(
+	config config.RouterConfig,
+	keyProvider *prv_drkey.Provider,
+	features env.Features,
+) *Connector {
 	return &Connector{
 		DataPlane: makeDataPlane(
 			RunConfig{
@@ -58,7 +63,9 @@ func NewConnector(config config.RouterConfig, features env.Features) *Connector 
 				ReceiveBufferSize:     config.ReceiveBufferSize,
 				SendBufferSize:        config.SendBufferSize,
 			},
+			keyProvider,
 			features.ExperimentalSCMPAuthentication,
+			features.ExperimentalIDINT,
 		),
 		ReceiveBufferSize:   config.ReceiveBufferSize,
 		SendBufferSize:      config.SendBufferSize,
@@ -69,7 +76,7 @@ func NewConnector(config config.RouterConfig, features env.Features) *Connector 
 }
 
 // CreateIACtx creates the context for ISD-AS.
-func (c *Connector) CreateIACtx(ia addr.IA) error {
+func (c *Connector) CreateIACtx(ia addr.IA, routerId uint32) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	log.Debug("CreateIACtx", "isd_as", ia)
@@ -77,12 +84,12 @@ func (c *Connector) CreateIACtx(ia addr.IA) error {
 		return serrors.JoinNoStack(errMultiIA, nil, "current", c.ia, "new", ia)
 	}
 	c.ia = ia
-	return c.DataPlane.SetIA(ia)
+	return c.DataPlane.SetIA(ia, routerId)
 }
 
 // AddInternalInterface adds the internal interface.
 func (c *Connector) AddInternalInterface(
-	ia addr.IA, localHost addr.Host, provider, localAddr string) error {
+	ia addr.IA, localHost addr.Host, provider, localAddr string, Speed uint64) error {
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
@@ -95,12 +102,18 @@ func (c *Connector) AddInternalInterface(
 		Provider: provider,
 		Addr:     localAddr,
 	})
-	return c.DataPlane.AddInternalInterface(localHost, provider, localAddr)
+	return c.DataPlane.AddInternalInterface(localHost, provider, localAddr, Speed)
 }
 
 // AddExternalInterface adds a link between the local and remote address.
 func (c *Connector) AddExternalInterface(
-	localIfID iface.ID, link control.LinkInfo, localHost, remoteHost addr.Host, owned bool) error {
+	localIfID iface.ID,
+	link control.LinkInfo,
+	localHost,
+	remoteHost addr.Host,
+	Speed uint64,
+	owned bool,
+) error {
 
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
@@ -133,7 +146,7 @@ func (c *Connector) AddExternalInterface(
 			NeighborIA:      link.Remote.IA,
 			State:           control.InterfaceDown,
 		}
-		return c.DataPlane.AddNextHop(intf, link, localHost, remoteHost)
+		return c.DataPlane.AddNextHop(intf, link, localHost, remoteHost, Speed)
 	}
 
 	if len(c.externalInterfaces) == 0 {
@@ -144,7 +157,7 @@ func (c *Connector) AddExternalInterface(
 		Link:  link,
 		State: control.InterfaceDown,
 	}
-	return c.DataPlane.AddExternalInterface(intf, link, localHost, remoteHost)
+	return c.DataPlane.AddExternalInterface(intf, link, localHost, remoteHost, Speed)
 }
 
 // AddSvc adds the service address for the given ISD-AS.

@@ -54,6 +54,7 @@ type MockLink struct {
 func (l *MockLink) IsUp() bool                                           { return true }
 func (l *MockLink) IfID() uint16                                         { return l.ifID }
 func (l *MockLink) Metrics() *InterfaceMetrics                           { return nil }
+func (l *MockLink) DpMetrics() *DpMetrics                                { return nil }
 func (l *MockLink) Scope() LinkScope                                     { return Internal }
 func (l *MockLink) BFDSession() *bfd.Session                             { return nil }
 func (l *MockLink) Resolve(p *Packet, host addr.Host, port uint16) error { return nil }
@@ -128,9 +129,9 @@ func mustMakeDP(
 	neighbors map[uint16]addr.IA,
 	key []byte) (dp dataPlane) {
 
-	dp = makeDataPlane(RunConfig{NumProcessors: 1, BatchSize: 64}, false)
+	dp = makeDataPlane(RunConfig{NumProcessors: 1, BatchSize: 64}, nil, false, false)
 
-	if err := dp.SetIA(local); err != nil {
+	if err := dp.SetIA(local, 0); err != nil {
 		panic(err)
 	}
 	for i, n := range neighbors {
@@ -149,7 +150,7 @@ func mustMakeDP(
 	// Make dummy interfaces, as requested by the test.
 	internalAddr := "198.51.100.1:3333"
 	localHost := addr.HostIP(netip.MustParseAddrPort(internalAddr).Addr())
-	if err := dp.AddInternalInterface(localHost, "udpip", internalAddr); err != nil {
+	if err := dp.AddInternalInterface(localHost, "udpip", internalAddr, 1000_0000); err != nil {
 		panic(err)
 	}
 	l := control.LinkEnd{
@@ -171,7 +172,7 @@ func mustMakeDP(
 			BFD:      nobfd,
 			LinkTo:   linkTypes[i],
 		}
-		if err := dp.AddExternalInterface(i, link, lh, rh); err != nil {
+		if err := dp.AddExternalInterface(i, link, lh, rh, 1000_0000); err != nil {
 			panic(err)
 		}
 	}
@@ -194,7 +195,7 @@ func mustMakeDP(
 			BFD:      nobfd,
 			LinkTo:   linkTypes[i],
 		}
-		if err := dp.AddNextHop(i, link, lh, rh); err != nil {
+		if err := dp.AddNextHop(i, link, lh, rh, 1000_0000); err != nil {
 			panic(err)
 		}
 	}
@@ -256,7 +257,7 @@ func NewDP(
 func NewDPRaw(runConfig RunConfig, authSCMP bool) *DataPlane {
 
 	edp := &DataPlane{
-		makeDataPlane(runConfig, authSCMP),
+		makeDataPlane(runConfig, nil, authSCMP, false),
 	}
 	return edp
 }
@@ -268,7 +269,7 @@ func (d *DataPlane) MockStart() {
 func (d *DataPlane) ProcessPkt(pkt *Packet) Disposition {
 
 	p := newPacketProcessor(&d.dataPlane)
-	disp := p.processPkt(pkt)
+	disp := p.processPkt(pkt, &packetMeta{})
 	// Erase trafficType; we don't set it in the expected results.
 	pkt.trafficType = ttOther
 	return Disposition(disp)

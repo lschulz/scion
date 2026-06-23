@@ -25,6 +25,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/scionproto/scion/pkg/addr"
@@ -160,6 +161,11 @@ func (u *provider) DelSvc(svc addr.SVC, host addr.Host, port uint16) error {
 	return nil
 }
 
+// AnySvc returns an underlay address for the given service.
+func (u *provider) AnySvc(svc addr.SVC) (netip.AddrPort, bool) {
+	return u.svc.Any(svc)
+}
+
 // The queues to be used by the receiver task are supplied at this point because they must be
 // sized according to the number of connections that will be started.
 func (u *provider) Start(
@@ -282,6 +288,8 @@ func (u *udpConnection) receive(batchSize int, pool router.PacketPool) {
 			log.Debug("Error while reading batch", "connection", u.name, "err", err)
 			continue
 		}
+		// TODO(lschulz): Get a better ingress timestamp
+		recvTime := time.Now().UnixNano()
 		numReusable -= numPkts
 		for i, msg := range msgs[:numPkts] {
 
@@ -289,6 +297,8 @@ func (u *udpConnection) receive(batchSize int, pool router.PacketPool) {
 			size := msg.N
 			p := packets[i]
 			p.RawPacket = p.RawPacket[:size]
+
+			p.IngressTime = uint64(recvTime)
 
 			// Demultiplex to a link.
 			if u.links != nil {
@@ -424,6 +434,7 @@ type connectedLink struct {
 	name       string // For logs
 	egressQ    chan<- *router.Packet
 	metrics    *router.InterfaceMetrics
+	dpMetrics  *router.DpMetrics
 	pool       router.PacketPool
 	bfdSession *bfd.Session
 	seed       uint32
@@ -440,6 +451,7 @@ func (u *provider) NewExternalLink(
 	remote string,
 	ifID uint16,
 	metrics *router.InterfaceMetrics,
+	dpMetrics *router.DpMetrics,
 ) (router.Link, error) {
 	localAddr, err := conn.ResolveAddrPortOrPort(local)
 	if err != nil {
@@ -458,7 +470,8 @@ func (u *provider) NewExternalLink(
 	if l := u.allLinks[remoteAddr]; l != nil {
 		return nil, serrors.Join(errDuplicateRemote, nil, "addr", remote)
 	}
-	return u.newConnectedLink(qSize, bfd, localAddr, remoteAddr, ifID, metrics, router.External)
+	return u.newConnectedLink(
+		qSize, bfd, localAddr, remoteAddr, ifID, metrics, dpMetrics, router.External)
 }
 
 func (u *provider) newConnectedLink(
@@ -468,6 +481,7 @@ func (u *provider) newConnectedLink(
 	remoteAddr netip.AddrPort,
 	ifID uint16,
 	metrics *router.InterfaceMetrics,
+	dpMetrics *router.DpMetrics,
 	scope router.LinkScope, // Since this can be used for either Sibling or External
 ) (router.Link, error) {
 	conn, err := u.connOpener.Open(localAddr, remoteAddr,
@@ -480,6 +494,7 @@ func (u *provider) newConnectedLink(
 		name:       remoteAddr.String(),
 		egressQ:    queue,
 		metrics:    metrics,
+		dpMetrics:  dpMetrics,
 		bfdSession: bfd,
 		seed:       makeHashSeed(),
 		ifID:       ifID,
@@ -536,6 +551,10 @@ func (l *connectedLink) Metrics() *router.InterfaceMetrics {
 	return l.metrics
 }
 
+func (l *connectedLink) DpMetrics() *router.DpMetrics {
+	return l.dpMetrics
+}
+
 func (l *connectedLink) Scope() router.LinkScope {
 	return l.scope
 }
@@ -572,6 +591,9 @@ func (l *connectedLink) receive(size int, srcAddr *net.UDPAddr, p *router.Packet
 	sc := router.ClassOfSize(size)
 	metrics[sc].InputPacketsTotal.Inc()
 	metrics[sc].InputBytesTotal.Add(float64(size))
+	l.dpMetrics.InputCounters.PacketsTotal.Add(1)
+	l.dpMetrics.InputCounters.BytesTotal.Add(uint64(size))
+	l.dpMetrics.InputMeter.Update(size, p.IngressTime)
 
 	p.Link = l
 	// The src address does not need to be recorded in the packet. The link has all the relevant
@@ -588,6 +610,7 @@ func (l *connectedLink) receive(size int, srcAddr *net.UDPAddr, p *router.Packet
 	default:
 		l.pool.Put(p)
 		metrics[sc].DroppedPacketsBusyProcessor.Inc()
+		l.dpMetrics.InputCounters.PacketsDropped.Add(1)
 	}
 }
 
@@ -599,6 +622,7 @@ type detachedLink struct {
 	name       string // For logs
 	egressQ    chan<- *router.Packet
 	metrics    *router.InterfaceMetrics
+	dpMetrics  *router.DpMetrics
 	pool       router.PacketPool
 	bfdSession *bfd.Session
 	remote     *net.UDPAddr
@@ -617,6 +641,7 @@ func (u *provider) NewSiblingLink(
 	local string,
 	remote string,
 	metrics *router.InterfaceMetrics,
+	dpMetrics *router.DpMetrics,
 ) (router.Link, error) {
 	localAddr, err := conn.ResolveAddrPortOrPort(local)
 	if err != nil {
@@ -639,15 +664,16 @@ func (u *provider) NewSiblingLink(
 	// If we have linux support, we use connected links, even though the local address is the same
 	// for all sibling links.
 	if u.connOpener.UDPCanReuseLocal() {
-		return u.newConnectedLink(qSize, bfd, localAddr, remoteAddr, 0, metrics, router.Sibling)
+		return u.newConnectedLink(qSize, bfd, localAddr, remoteAddr, 0, metrics, dpMetrics, router.Sibling)
 	}
-	return u.newDetachedLink(bfd, remoteAddr, metrics)
+	return u.newDetachedLink(bfd, remoteAddr, metrics, dpMetrics)
 }
 
 func (u *provider) newDetachedLink(
 	bfd *bfd.Session,
 	remoteAddr netip.AddrPort,
 	metrics *router.InterfaceMetrics,
+	dpMetrics *router.DpMetrics,
 ) (router.Link, error) {
 	// All detached links re-use the internal connection.
 	c := u.internalConnection
@@ -660,6 +686,7 @@ func (u *provider) newDetachedLink(
 		name:       remoteAddr.String(),
 		egressQ:    c.queue,
 		metrics:    metrics,
+		dpMetrics:  dpMetrics,
 		bfdSession: bfd,
 		remote:     net.UDPAddrFromAddrPort(remoteAddr),
 		seed:       u.internalHashSeed,
@@ -704,6 +731,10 @@ func (l *detachedLink) Metrics() *router.InterfaceMetrics {
 	return l.metrics
 }
 
+func (l *detachedLink) DpMetrics() *router.DpMetrics {
+	return l.dpMetrics
+}
+
 func (l *detachedLink) Scope() router.LinkScope {
 	return router.Sibling
 }
@@ -746,6 +777,9 @@ func (l *detachedLink) receive(size int, srcAddr *net.UDPAddr, p *router.Packet)
 	sc := router.ClassOfSize(size)
 	metrics[sc].InputPacketsTotal.Inc()
 	metrics[sc].InputBytesTotal.Add(float64(size))
+	l.dpMetrics.InputCounters.PacketsTotal.Add(1)
+	l.dpMetrics.InputCounters.BytesTotal.Add(uint64(size))
+	l.dpMetrics.InputMeter.Update(size, p.IngressTime)
 
 	p.Link = l
 	// The src address does not need to be recorded in the packet. The link has all the relevant
@@ -762,6 +796,7 @@ func (l *detachedLink) receive(size int, srcAddr *net.UDPAddr, p *router.Packet)
 	default:
 		l.pool.Put(p)
 		metrics[sc].DroppedPacketsBusyProcessor.Inc()
+		l.dpMetrics.InputCounters.PacketsDropped.Add(1)
 	}
 }
 
@@ -772,6 +807,7 @@ type internalLink struct {
 	procStop         chan struct{}
 	procDone         chan struct{}
 	metrics          *router.InterfaceMetrics
+	dpMetrics        *router.DpMetrics
 	pool             router.PacketPool
 	svc              *router.Services[netip.AddrPort]
 	seed             uint32
@@ -785,7 +821,7 @@ type internalLink struct {
 // TODO(multi_underlay): We still go with the assumption that internal links are always
 // udpip, so we don't expect a string here. That should change.
 func (u *provider) NewInternalLink(
-	local string, qSize int, metrics *router.InterfaceMetrics,
+	local string, qSize int, metrics *router.InterfaceMetrics, dpMetrics *router.DpMetrics,
 ) (router.Link, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -809,6 +845,7 @@ func (u *provider) NewInternalLink(
 	il := &internalLink{
 		egressQ:          queue,
 		metrics:          metrics,
+		dpMetrics:        dpMetrics,
 		svc:              u.svc,
 		seed:             u.internalHashSeed,
 		dispatchStart:    u.dispatchStart,
@@ -934,6 +971,10 @@ func (l *internalLink) Metrics() *router.InterfaceMetrics {
 	return l.metrics
 }
 
+func (l *internalLink) DpMetrics() *router.DpMetrics {
+	return l.dpMetrics
+}
+
 func (l *internalLink) Scope() router.LinkScope {
 	return router.Internal
 }
@@ -1011,6 +1052,9 @@ func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *router.Packet)
 	sc := router.ClassOfSize(size)
 	metrics[sc].InputPacketsTotal.Inc()
 	metrics[sc].InputBytesTotal.Add(float64(size))
+	l.dpMetrics.InputCounters.PacketsTotal.Add(1)
+	l.dpMetrics.InputCounters.BytesTotal.Add(uint64(size))
+	l.dpMetrics.InputMeter.Update(size, p.IngressTime)
 
 	p.Link = l
 	// This is an unconnected link. We must record the src address in case the packet is turned
@@ -1029,6 +1073,7 @@ func (l *internalLink) receive(size int, srcAddr *net.UDPAddr, p *router.Packet)
 	default:
 		l.pool.Put(p)
 		metrics[sc].DroppedPacketsBusyProcessor.Inc()
+		l.dpMetrics.InputCounters.PacketsDropped.Add(1)
 	}
 }
 

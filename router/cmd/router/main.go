@@ -32,6 +32,7 @@ import (
 	"github.com/scionproto/scion/pkg/private/serrors"
 	"github.com/scionproto/scion/private/app"
 	"github.com/scionproto/scion/private/app/launcher"
+	"github.com/scionproto/scion/private/drkey"
 	"github.com/scionproto/scion/private/service"
 	"github.com/scionproto/scion/private/topology"
 	"github.com/scionproto/scion/router"
@@ -60,7 +61,16 @@ func realMain(ctx context.Context) error {
 		return err
 	}
 	g, errCtx := errgroup.WithContext(ctx)
-	dp := router.NewConnector(globalCfg.Router, globalCfg.Features)
+
+	var keyProvider *drkey.Provider
+	if globalCfg.Features.ExperimentalIDINT {
+		keyProvider, err = drkey.NewProvider(controlConfig.IA, globalCfg.DRKey.PrefetchEntries)
+		if err != nil {
+			return err
+		}
+	}
+
+	dp := router.NewConnector(globalCfg.Router, keyProvider, globalCfg.Features)
 	iaCtx := &control.IACtx{
 		Config: controlConfig,
 		DP:     dp,

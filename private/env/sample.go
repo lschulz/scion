@@ -23,7 +23,7 @@ config_dir = "/etc/scion"
 `
 
 const featuresSample = `
-# Feature flags are various boolean properties as defined in go/lib/env/features.go
+# Feature flags are various boolean properties as defined in private/env/features.go
 `
 
 const daemonSample = `

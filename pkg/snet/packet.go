@@ -29,6 +29,7 @@ import (
 // Payload is the payload of the message, use the different payload type to
 // instantiate it.
 type Payload interface {
+	protocolType() slayers.L4ProtocolType
 	toLayers(scn *slayers.SCION) []gopacket.SerializableLayer
 	length() int
 }
@@ -39,8 +40,11 @@ type UDPPayload struct {
 	Payload          []byte
 }
 
+func (m UDPPayload) protocolType() slayers.L4ProtocolType {
+	return slayers.L4UDP
+}
+
 func (m UDPPayload) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
-	scn.NextHdr = slayers.L4UDP
 	udp := slayers.UDP{
 		SrcPort: m.SrcPort,
 		DstPort: m.DstPort,
@@ -70,6 +74,10 @@ type SCMPDestinationUnreachable struct {
 	Payload []byte
 }
 
+func (m SCMPDestinationUnreachable) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
+}
+
 func (m SCMPDestinationUnreachable) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
 	return toLayers(m, scn, &slayers.SCMPDestinationUnreachable{}, m.Payload)
 }
@@ -90,6 +98,10 @@ func (m SCMPDestinationUnreachable) length() int {
 type SCMPPacketTooBig struct {
 	MTU     uint16
 	Payload []byte
+}
+
+func (m SCMPPacketTooBig) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
 }
 
 func (m SCMPPacketTooBig) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
@@ -113,6 +125,10 @@ type SCMPParameterProblem struct {
 	code    slayers.SCMPCode
 	Pointer uint16
 	Payload []byte
+}
+
+func (m SCMPParameterProblem) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
 }
 
 func (m SCMPParameterProblem) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
@@ -139,6 +155,10 @@ type SCMPExternalInterfaceDown struct {
 	IA        addr.IA
 	Interface uint64
 	Payload   []byte
+}
+
+func (m SCMPExternalInterfaceDown) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
 }
 
 func (m SCMPExternalInterfaceDown) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
@@ -169,6 +189,10 @@ type SCMPInternalConnectivityDown struct {
 	IA              addr.IA
 	Ingress, Egress uint64
 	Payload         []byte
+}
+
+func (m SCMPInternalConnectivityDown) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
 }
 
 func (m SCMPInternalConnectivityDown) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
@@ -225,6 +249,10 @@ type SCMPEchoRequest struct {
 	Payload    []byte
 }
 
+func (m SCMPEchoRequest) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
+}
+
 func (m SCMPEchoRequest) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
 	return toLayers(m, scn,
 		&slayers.SCMPEcho{
@@ -252,6 +280,10 @@ type SCMPEchoReply struct {
 	Payload    []byte
 }
 
+func (m SCMPEchoReply) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
+}
+
 func (m SCMPEchoReply) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
 	return toLayers(m, scn,
 		&slayers.SCMPEcho{
@@ -276,6 +308,10 @@ func (m SCMPEchoReply) length() int {
 type SCMPTracerouteRequest struct {
 	Identifier uint16
 	Sequence   uint16
+}
+
+func (m SCMPTracerouteRequest) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
 }
 
 func (m SCMPTracerouteRequest) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
@@ -306,6 +342,10 @@ type SCMPTracerouteReply struct {
 	Interface  uint64
 }
 
+func (m SCMPTracerouteReply) protocolType() slayers.L4ProtocolType {
+	return slayers.L4SCMP
+}
+
 func (m SCMPTracerouteReply) toLayers(scn *slayers.SCION) []gopacket.SerializableLayer {
 	return toLayers(m, scn,
 		&slayers.SCMPTraceroute{
@@ -332,7 +372,6 @@ func toLayers(scmpPld SCMPPayload,
 	scn *slayers.SCION, details gopacket.SerializableLayer,
 	payload []byte) []gopacket.SerializableLayer {
 
-	scn.NextHdr = slayers.L4SCMP
 	scmp := &slayers.SCMP{TypeCode: slayers.CreateSCMPTypeCode(scmpPld.Type(), scmpPld.Code())}
 	scmp.SetNetworkLayerForChecksum(scn)
 	l := []gopacket.SerializableLayer{
@@ -370,7 +409,7 @@ type Packet struct {
 func (p *Packet) Decode() error {
 	var (
 		scionLayer slayers.SCION
-		hbhLayer   slayers.HopByHopExtnSkipper
+		hbhLayer   slayers.HopByHopExtn
 		e2eLayer   slayers.EndToEndExtnSkipper
 		udpLayer   slayers.UDP
 		scmpLayer  slayers.SCMP
@@ -411,6 +450,17 @@ func (p *Packet) Decode() error {
 		}
 	}
 	p.Path = rpath
+
+	for _, layer := range decoded {
+		if layer == slayers.LayerTypeHopByHopExtn {
+			if i := hbhLayer.FindOptionIndex(slayers.OptTypeIdInt); i >= 0 {
+				p.Telemetry.Report = new(RawIntReport)
+				if err := p.Telemetry.Report.Parse(hbhLayer.Options[i:]); err != nil {
+					return err
+				}
+			}
+		}
+	}
 
 	switch l4 {
 	case slayers.LayerTypeSCIONUDP:
@@ -572,17 +622,33 @@ func (p *Packet) Serialize() error {
 		return serrors.Wrap("setting source address", err)
 	}
 
-	// XXX(roosd): Currently, this does not take the extension headers
-	// into consideration.
-	scionLayer.PayloadLen = uint16(p.Payload.length())
-
-	// At this point all the fields in the SCION header apart from the path
-	// and path type must be set already.
+	// At this point all the fields in the SCION header apart from the payload
+	// length, path, and path type must be set already.
 	if err := p.Path.SetPath(&scionLayer); err != nil {
 		return serrors.Wrap("setting path", err)
 	}
 
 	packetLayers = append(packetLayers, &scionLayer)
+	scionLayer.NextHdr = p.Payload.protocolType()
+
+	if p.Telemetry.Request != nil {
+		var nextHdr slayers.L4ProtocolType
+		switch p.Payload.(type) {
+		case UDPPayload:
+			nextHdr = slayers.L4UDP
+		default:
+			nextHdr = slayers.L4SCMP
+		}
+		var hbhLayer slayers.HopByHopExtn
+		opts, err := p.Telemetry.Request.AppendTo(hbhLayer.Options, nextHdr, 0)
+		if err != nil {
+			return serrors.Wrap("setting telemetry header", err)
+		}
+		hbhLayer.NextHdr = scionLayer.NextHdr
+		scionLayer.NextHdr = slayers.HopByHopClass
+		hbhLayer.Options = opts
+		packetLayers = append(packetLayers, &hbhLayer)
+	}
 	packetLayers = append(packetLayers, p.Payload.toLayers(&scionLayer)...)
 
 	buffer := gopacket.NewSerializeBuffer()
@@ -602,6 +668,15 @@ func (p *Packet) Serialize() error {
 	return nil
 }
 
+// IdIntInfo contains either a telemetry request or a response. Only one of
+// request and report should be non-nli.
+type IdIntInfo struct {
+	// Telemetry request to include in the packet.
+	Request IntRequestEncoder
+	// Telemetry read from a received packet.
+	Report *RawIntReport
+}
+
 // PacketInfo contains the data needed to construct a SCION packet.
 //
 // This is a high-level structure, and can only be used to create valid
@@ -615,6 +690,8 @@ type PacketInfo struct {
 	Source SCIONAddress
 	// Path contains a SCION forwarding path. This field must not be nil.
 	Path DataplanePath
+	// ID-INT telemetry request or report.
+	Telemetry IdIntInfo
 	// Payload is the Payload of the message.
 	Payload Payload
 }

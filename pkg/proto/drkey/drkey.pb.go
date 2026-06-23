@@ -26,6 +26,7 @@ type Protocol int32
 const (
 	Protocol_PROTOCOL_GENERIC_UNSPECIFIED Protocol = 0
 	Protocol_PROTOCOL_SCMP                Protocol = 1
+	Protocol_PROTOCOL_IDINT               Protocol = 2
 )
 
 // Enum value maps for Protocol.
@@ -33,10 +34,12 @@ var (
 	Protocol_name = map[int32]string{
 		0: "PROTOCOL_GENERIC_UNSPECIFIED",
 		1: "PROTOCOL_SCMP",
+		2: "PROTOCOL_IDINT",
 	}
 	Protocol_value = map[string]int32{
 		"PROTOCOL_GENERIC_UNSPECIFIED": 0,
 		"PROTOCOL_SCMP":                1,
+		"PROTOCOL_IDINT":               2,
 	}
 )
 
@@ -71,10 +74,11 @@ var File_proto_drkey_v1_drkey_proto protoreflect.FileDescriptor
 
 const file_proto_drkey_v1_drkey_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/drkey/v1/drkey.proto\x12\x0eproto.drkey.v1*K\n" +
+	"\x1aproto/drkey/v1/drkey.proto\x12\x0eproto.drkey.v1*_\n" +
 	"\bProtocol\x12 \n" +
 	"\x1cPROTOCOL_GENERIC_UNSPECIFIED\x10\x00\x12\x11\n" +
-	"\rPROTOCOL_SCMP\x10\x01\"\n" +
+	"\rPROTOCOL_SCMP\x10\x01\x12\x12\n" +
+	"\x0ePROTOCOL_IDINT\x10\x02\"\n" +
 	"\b\x80\x80\x04\x10\xff\xff\xff\xff\aB-Z+github.com/scionproto/scion/pkg/proto/drkeyb\x06proto3"
 
 var (

@@ -40,6 +40,9 @@ DEFAULT_MTU = 1500 - 20 - 8
 #: IPv6 min value
 SCION_MIN_MTU = 1280
 
+# Default link bandwidth in Mbit/s.
+DEFAULT_BW = 10000
+
 # Default IPv4 network
 DEFAULT_NETWORK = "127.0.0.0/8"
 DEFAULT_PRIV_NETWORK = "192.168.0.0/16"

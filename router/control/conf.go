@@ -32,10 +32,13 @@ import (
 // Dataplane is the interface that this controller or the http status handler expect from the
 // Dataplane.
 type Dataplane interface {
-	CreateIACtx(ia addr.IA) error
-	AddInternalInterface(ia addr.IA, localHost addr.Host, provider, local string) error
+	CreateIACtx(ia addr.IA, routerId uint32) error
+	AddInternalInterface(
+		ia addr.IA, localHost addr.Host, provider, local string, speed uint64) error
 	AddExternalInterface(
-		localIfID iface.ID, info LinkInfo, localHost, remoteHost addr.Host, owned bool) error
+		localIfID iface.ID, info LinkInfo, localHost, remoteHost addr.Host, speed uint64,
+		owned bool,
+	) error
 	AddSvc(ia addr.IA, svc addr.SVC, a addr.Host, port uint16) error
 	DelSvc(ia addr.IA, svc addr.SVC, a addr.Host, port uint16) error
 	SetKey(ia addr.IA, index int, key []byte) error
@@ -55,6 +58,7 @@ type LinkInfo struct {
 	LinkTo   topology.LinkType
 	BFD      BFD
 	MTU      int
+	Speed    uint64
 }
 
 // LinkEnd represents one end of a link.
@@ -126,7 +130,7 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 		return serrors.New("empty configuration")
 	}
 	// Set ISD-AS
-	if err := dp.CreateIACtx(cfg.IA); err != nil {
+	if err := dp.CreateIACtx(cfg.IA, cfg.BR.IdInt.NodeId); err != nil {
 		return err
 	}
 	// Set Keys
@@ -147,7 +151,8 @@ func ConfigDataplane(dp Dataplane, cfg *Config) error {
 			host := addr.HostIP(cfg.BR.InternalAddr.Addr())
 			provider := "udpip" // Since BR.InternalInterface is always a netip.AddrPort
 			addr := cfg.BR.InternalAddr.String()
-			if err := dp.AddInternalInterface(cfg.IA, host, provider, addr); err != nil {
+			err := dp.AddInternalInterface(cfg.IA, host, provider, addr, cfg.BR.IdInt.InternalSpeed)
+			if err != nil {
 				return err
 			}
 		} // else TODO: what legitimate reason would there be to not have an internal addr?
@@ -253,7 +258,7 @@ func confExternalInterfaces(dp Dataplane, cfg *Config) error {
 		}
 
 		if err := dp.AddExternalInterface(
-			ifID, linkInfo, localHost, remoteHost, owned); err != nil {
+			ifID, linkInfo, localHost, remoteHost, iface.IdInt.Speed, owned); err != nil {
 			return err
 		}
 	}

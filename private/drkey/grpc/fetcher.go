@@ -30,6 +30,29 @@ type Fetcher struct {
 	Dialer sc_grpc.Dialer
 }
 
+func (f *Fetcher) Level1Key(
+	ctx context.Context,
+	meta drkey.Level1Meta,
+) (drkey.Level1Key, error) {
+
+	conn, err := f.Dialer.Dial(ctx, &snet.SVCAddr{SVC: addr.SvcCS})
+	if err != nil {
+		return drkey.Level1Key{}, serrors.Wrap("dialing", err)
+	}
+	defer conn.Close()
+	client := cppb.NewDRKeyIntraServiceClient(conn)
+	protoReq := level1MetaToProtoRequest(meta)
+	rep, err := client.DRKeyIntraLevel1(ctx, protoReq)
+	if err != nil {
+		return drkey.Level1Key{}, serrors.Wrap("requesting level 1 key", err)
+	}
+	lvl1Key, err := getLevel1KeyFromReply(meta, rep)
+	if err != nil {
+		return drkey.Level1Key{}, serrors.Wrap("obtaining level 1 key from reply", err)
+	}
+	return lvl1Key, nil
+}
+
 func (f *Fetcher) ASHostKey(
 	ctx context.Context,
 	meta drkey.ASHostMeta,
