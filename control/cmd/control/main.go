@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -883,10 +884,33 @@ func realMain(ctx context.Context) error {
 		return err
 	}
 
-	staticInfo, err := beaconing.ParseStaticInfoCfg(globalCfg.General.StaticInfoConfig())
+	staticInfoPath := globalCfg.General.StaticInfoConfig()
+	staticInfo, err := beaconing.ParseStaticInfoCfg(staticInfoPath)
 	if err != nil {
 		log.Info("No static info file found. Static info settings disabled.", "err", err)
 	}
+	var staticInfoVal atomic.Pointer[beaconing.StaticInfoCfg]
+	if staticInfo != nil {
+		staticInfoVal.Store(staticInfo)
+	}
+	staticInfoHUP := app.SIGHUPChannel(errCtx)
+	g.Go(func() error {
+		defer log.HandlePanic()
+		for {
+			select {
+			case <-staticInfoHUP:
+				cfg, err := beaconing.ParseStaticInfoCfg(staticInfoPath)
+				if err != nil {
+					log.Error("Reloading static info failed, keeping previous", "err", err)
+					continue
+				}
+				staticInfoVal.Store(cfg)
+				log.Info("Reloaded static info", "file", staticInfoPath)
+			case <-errCtx.Done():
+				return nil
+			}
+		}
+	})
 
 	var propagationFilter func(intf *ifstate.Interface) bool
 	if topo.Core() {
@@ -974,7 +998,7 @@ func realMain(ctx context.Context) error {
 		DRKeyEngine: drkeyEngine,
 		MACGen:      macGen,
 		NextHopper:  topo,
-		StaticInfo:  func() *beaconing.StaticInfoCfg { return staticInfo },
+		StaticInfo:  func() *beaconing.StaticInfoCfg { return staticInfoVal.Load() },
 
 		DiscoveryInfo: func() *discoveryext.Extension {
 			cses := topo.ControlServiceAddresses()
