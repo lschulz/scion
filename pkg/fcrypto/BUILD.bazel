@@ -34,10 +34,5 @@ go_test(
         "export_test.go",
     ],
     embed = [":go_default_library"],
-    deps = select({
-        "@rules_go//go/platform:amd64": [
-            "@com_github_stretchr_testify//assert:go_default_library",
-        ],
-        "//conditions:default": [],
-    }),
+    deps = ["@com_github_stretchr_testify//assert:go_default_library"],
 )
