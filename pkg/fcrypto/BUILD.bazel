@@ -7,6 +7,8 @@ go_library(
         "crypto.c",
         "crypto.go",
         "crypto.h",
+        "crypto_amd64.go",
+        "crypto_slow.go",
     ],
     cgo = True,
     copts = select({
@@ -17,16 +19,20 @@ go_library(
     }),
     importpath = "github.com/scionproto/scion/pkg/fcrypto",
     visibility = ["//visibility:public"],
+    deps = select({
+        "@rules_go//go/platform:amd64": [
+            "@org_golang_x_sys//cpu:go_default_library",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "go_default_test",
-    srcs = ["crypto_test.go"],
-    deps = select({
-        "@rules_go//go/platform:amd64": [
-            ":go_default_library",
-            "@com_github_stretchr_testify//assert:go_default_library",
-        ],
-        "//conditions:default": [],
-    }),
+    srcs = [
+        "crypto_test.go",
+        "export_test.go",
+    ],
+    embed = [":go_default_library"],
+    deps = ["@com_github_stretchr_testify//assert:go_default_library"],
 )

@@ -399,8 +399,10 @@ MainLoop:
 				// avoid flooding the network while the session is down.
 				s.desiredMinTXInterval = defaultTransmissionInterval
 				s.pollInFlight = false
+				s.rttLock.Lock()
 				s.rttEstimate = 0
 				s.rttValid = false
+				s.rttLock.Unlock()
 				if s.Metrics.RTT != nil {
 					s.Metrics.RTT.Set(0)
 				}

@@ -81,8 +81,7 @@ const (
 
 	// Needed to compute required padding
 	ptrSize = unsafe.Sizeof(&struct{ int }{})
-	is32bit = 1 - (ptrSize-4)/4
-	is64bit = 1 - (ptrSize-8)/4
+	is64bit = ptrSize / 8
 
 	// For SCMP packet quoting. A strict minimum of 28 is required. Much more is recommended.
 	minHeadroom      = 512
@@ -1370,9 +1369,8 @@ func (p *scionPacketProcessor) getIntMetadata(meta *packetMeta) *slayers.IntMeta
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = 0x0201
 		case idint.InSoftwareVersion:
-			// TODO(lschulz): Get version information from build system
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = ((0 << 22) | (15 << 12)) // 0.15.0
+			md.InstrData[i] = uint64(idintStartupVersion)
 		case idint.InIngressPortSpeed:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = min(uint64(ingress.InputMeter.linkSpeed)/1000_0000, math.MaxUint32)

@@ -21,26 +21,6 @@
 #include <immintrin.h>
 #include <emmintrin.h>
 
-
-uint32_t RandUInt32(void)
-{
-    uint32_t val = 0;
-    while (!_rdrand32_step(&val)) {
-        _mm_pause();
-    }
-    return val;
-}
-
-uint64_t RandUInt64(void)
-{
-    unsigned long long val = 0;
-    while (!_rdrand64_step(&val)) {
-        _mm_pause();
-    }
-    return (uint64_t)val;
-}
-
-
 #define AESCTR_MAX_BYTES 64
 #define KEY_SCHED_SIZE 10
 
@@ -131,12 +111,11 @@ bool AESCTR(const uint8_t* pKey, const uint8_t* pNonce, uint8_t* pData, size_t l
     __m128i temp;
 
     // Initialization
-    // Counter increment matches Go's cipher-Stream for <256 blocks.
     const __m128i inc = _mm_set_epi64x(1ll << 56, 0);
     __m128i state1 = _mm_load_si128((const __m128i*)nonce);
-    __m128i state2 = _mm_add_epi8(state1, inc);
-    __m128i state3 = _mm_add_epi8(state2, inc);
-    __m128i state4 = _mm_add_epi8(state3, inc);
+    __m128i state2 = _mm_add_epi32(state1, inc);
+    __m128i state3 = _mm_add_epi32(state2, inc);
+    __m128i state4 = _mm_add_epi32(state3, inc);
 
     state1 = _mm_xor_si128(state1, key);
     state2 = _mm_xor_si128(state2, key);
