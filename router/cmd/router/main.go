@@ -78,6 +78,13 @@ func realMain(ctx context.Context) error {
 	if err := iaCtx.Configure(); err != nil {
 		return serrors.Wrap("configuring dataplane", err)
 	}
+	if globalCfg.Features.ExperimentalIDINT {
+		g.Go(func() error {
+			defer log.HandlePanic()
+			reloadInterfaceSpeedOnSIGHUP(errCtx, dp)
+			return nil
+		})
+	}
 	statusPages := service.StatusPages{
 		"info":      service.NewInfoStatusPage(),
 		"config":    service.NewConfigStatusPage(globalCfg),
@@ -146,6 +153,29 @@ func loadControlConfig() (*control.Config, error) {
 		return nil, serrors.Wrap("loading topology", err)
 	}
 	return newConf, nil
+}
+
+func reloadInterfaceSpeedOnSIGHUP(ctx context.Context, dp *router.Connector) {
+	sighup := app.SIGHUPChannel(ctx)
+	for {
+		select {
+		case <-sighup:
+			new, err := loadControlConfig()
+			if err != nil {
+				log.Error("Reloading topology.json failed", "err", err)
+				continue
+			}
+			for ifID, info := range new.Topo.IFInfoMap() {
+				dp.SetInterfaceSpeed(uint16(ifID), info.IdInt.Speed)
+			}
+			if new.BR != nil {
+				dp.SetInterfaceSpeed(0, new.BR.IdInt.InternalSpeed)
+			}
+			log.Info("Reloaded link speeds from topology.json")
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func topologyHandler(topo topology.Topology) service.StatusPage {

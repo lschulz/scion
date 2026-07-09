@@ -571,6 +571,14 @@ func (d *dataPlane) AddNeighborIA(ifID uint16, remote addr.IA) error {
 	return nil
 }
 
+func (d *dataPlane) SetInterfaceSpeed(ifID uint16, speed uint64) {
+	if link := d.interfaces[ifID]; link != nil {
+		m := link.DpMetrics()
+		m.InputMeter.SetSpeed(speed)
+		m.OutputMeter.SetSpeed(speed)
+	}
+}
+
 // newExternalInterfaceBFD adds the inter AS connection BFD session.
 func (d *dataPlane) newExternalInterfaceBFD(
 	ifID uint16, link control.LinkInfo, localHost, remoteHost addr.Host,
@@ -1373,10 +1381,10 @@ func (p *scionPacketProcessor) getIntMetadata(meta *packetMeta) *slayers.IntMeta
 			md.InstrData[i] = uint64(idintStartupVersion)
 		case idint.InIngressPortSpeed:
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = min(uint64(ingress.InputMeter.linkSpeed)/1000_0000, math.MaxUint32)
+			md.InstrData[i] = min(ingress.InputMeter.Speed()/1000_0000, math.MaxUint32)
 		case idint.InEgressPortSpeed:
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = min(uint64(egress.OutputMeter.linkSpeed)/1000_0000, math.MaxUint32)
+			md.InstrData[i] = min(egress.OutputMeter.Speed()/1000_0000, math.MaxUint32)
 		case idint.InRttNextBr:
 			if bfd := p.d.interfaces[p.pkt.egress].BFDSession(); bfd != nil {
 				if rtt, ok := bfd.RTT(); ok {

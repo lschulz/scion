@@ -253,6 +253,10 @@ func (c *Connector) applyBFDDefaults(cfg control.BFD) control.BFD {
 	return cfg
 }
 
+func (c *Connector) SetInterfaceSpeed(ifID uint16, speed uint64) {
+	c.DataPlane.SetInterfaceSpeed(ifID, speed)
+}
+
 func (c *Connector) SetPortRange(start, end uint16) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()

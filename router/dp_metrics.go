@@ -23,17 +23,19 @@ const linkMeterPeriod = 0.1
 
 // Meter for estimating link utilization.
 type LinkMeter struct {
-	bucket      float64 // bits
-	elapsed     float64 // seconds
-	linkSpeed   float64 // bits/s
-	lastCount   uint64  // nanoseconds, arbitrary epoch
+	bucket      float64       // bits
+	elapsed     float64       // seconds
+	linkSpeed   atomic.Uint64 // bits/s
+	lastCount   uint64        // nanoseconds, arbitrary epoch
 	utilization atomic.Uint32
 }
 
-func newLinkMeter(linkSpeedBps uint64) LinkMeter {
-	return LinkMeter{
-		linkSpeed: float64(linkSpeedBps),
-	}
+func (m *LinkMeter) Speed() uint64 {
+	return m.linkSpeed.Load()
+}
+
+func (m *LinkMeter) SetSpeed(linkSpeedBps uint64) {
+	m.linkSpeed.Store(linkSpeedBps)
 }
 
 // Update updates the meter. Update must not be called concurrently without
@@ -46,7 +48,7 @@ func (m *LinkMeter) Update(size int, now uint64) {
 	m.lastCount = now
 
 	if m.elapsed >= linkMeterPeriod {
-		util := math.Min(m.bucket/(m.elapsed*m.linkSpeed), 1.0)
+		util := math.Min(m.bucket/(m.elapsed*float64(m.linkSpeed.Load())), 1.0)
 		m.utilization.Store(uint32(util * float64(^uint32(0))))
 		m.bucket = .0
 		m.elapsed = .0
@@ -67,10 +69,8 @@ type DpMetrics struct {
 }
 
 func newDpMetrics(linkSpeedBps uint64) *DpMetrics {
-	return &DpMetrics{
-		InputCounters:  DpCounters{},
-		OutputCounters: DpCounters{},
-		InputMeter:     newLinkMeter(linkSpeedBps),
-		OutputMeter:    newLinkMeter(linkSpeedBps),
-	}
+	m := &DpMetrics{}
+	m.InputMeter.SetSpeed(linkSpeedBps)
+	m.OutputMeter.SetSpeed(linkSpeedBps)
+	return m
 }
