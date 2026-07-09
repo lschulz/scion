@@ -12,13 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build amd64
-
 package fcrypto_test
 
 import (
 	"crypto/aes"
-	"crypto/cipher"
 	"testing"
 
 	"github.com/scionproto/scion/pkg/fcrypto"
@@ -38,39 +35,10 @@ func TestCBCMAC(t *testing.T) {
 	}
 
 	for size := 0; size <= 64; size++ {
-		expected := cbcMac(block, input[:size])
+		expected := fcrypto.CbcMac(block, input[:size])
 		actual := fcrypto.CBCMAC(&key, input[:size])
 		assert.Equal(t, expected, actual)
 	}
-}
-
-func cbcMac(block cipher.Block, input []byte) [16]byte {
-	zeroBlock := [16]byte{}
-
-	blockSize := block.BlockSize()
-	blocks := len(input) / blockSize
-	buffer := make([]byte, blocks*blockSize)
-	copy(buffer, input)
-
-	var mac [16]byte
-	for i := 0; i < blocks; i++ {
-		for j := 0; j < blockSize; j++ {
-			mac[j] = mac[j] ^ input[i*blockSize+j]
-		}
-		cbc := cipher.NewCBCEncrypter(block, zeroBlock[:])
-		cbc.CryptBlocks(mac[:], mac[:])
-	}
-
-	rem := len(input) % blockSize
-	if rem > 0 {
-		for j := 0; j < rem; j++ {
-			mac[j] = mac[j] ^ input[blocks*blockSize+j]
-		}
-		cbc := cipher.NewCBCEncrypter(block, zeroBlock[:])
-		cbc.CryptBlocks(mac[:], mac[:])
-	}
-
-	return mac
 }
 
 func TestAESCTR(t *testing.T) {
@@ -87,7 +55,7 @@ func TestAESCTR(t *testing.T) {
 	}
 
 	for size := 0; size <= 64; size++ {
-		expected := ctrMode(block, nonce, input[:size])
+		expected := fcrypto.CtrMode(block, &nonce, input[:size])
 
 		actual := make([]byte, size)
 		copy(actual, input[:size])
@@ -95,13 +63,4 @@ func TestAESCTR(t *testing.T) {
 
 		assert.Equal(t, expected, actual)
 	}
-}
-
-func ctrMode(block cipher.Block, nonce [12]byte, input []byte) []byte {
-	var iv [16]byte
-	copy(iv[:], nonce[:])
-	ctr := cipher.NewCTR(block, iv[:])
-	output := make([]byte, len(input))
-	ctr.XORKeyStream(output, input)
-	return output
 }

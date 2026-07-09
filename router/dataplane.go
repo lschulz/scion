@@ -81,8 +81,7 @@ const (
 
 	// Needed to compute required padding
 	ptrSize = unsafe.Sizeof(&struct{ int }{})
-	is32bit = 1 - (ptrSize-4)/4
-	is64bit = 1 - (ptrSize-8)/4
+	is64bit = ptrSize / 8
 
 	// For SCMP packet quoting. A strict minimum of 28 is required. Much more is recommended.
 	minHeadroom      = 512
