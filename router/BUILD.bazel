@@ -5,6 +5,7 @@ go_library(
     name = "go_default_library",
     srcs = [
         "connector.go",
+        "cpu_meter.go",
         "dataplane.go",
         "doc.go",
         "dp_metrics.go",

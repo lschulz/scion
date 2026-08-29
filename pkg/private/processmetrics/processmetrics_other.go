@@ -27,3 +27,15 @@ import (
 func Init() error {
 	return serrors.New("Not supported for this platform")
 }
+
+func ReadProcCpuTime() (ProcCpuTime, error) {
+	return ProcCpuTime{}, serrors.New("Not supported for this platform")
+}
+
+func ReadHostCpuTime() (HostCpuTime, error) {
+	return HostCpuTime{}, serrors.New("Not supported for this platform")
+}
+
+func ReadSchedTime() (SchedTime, error) {
+	return SchedTime{}, serrors.New("Not supported for this platform")
+}

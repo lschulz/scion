@@ -252,7 +252,8 @@ type dataPlane struct {
 	Metrics             *Metrics
 	dispatchedPortStart uint16
 	dispatchedPortEnd   uint16
-	idIntKeyProvider    idIntKeyProvider
+	idintKeyProvider    idintKeyProvider
+	idintCpuMeter       CPUMeter
 
 	ExperimentalSCMPAuthentication bool
 	ExperimentalIDINT              bool
@@ -323,7 +324,7 @@ type drkeyProvider interface {
 }
 
 // DRKey key provider for ID-INT fast path.
-type idIntKeyProvider interface {
+type idintKeyProvider interface {
 	SetDialer(dialer libgrpc.Dialer)
 	GetASHostKey(validTime time.Time, dstIA addr.IA, dstAddr addr.Host) (drkey.Key, error)
 	RunPrefetcher() error
@@ -371,7 +372,7 @@ func makeDataPlane(
 		ExperimentalSCMPAuthentication: authSCMP,
 		ExperimentalIDINT:              enbIdInt,
 		RunConfig:                      runConfig,
-		idIntKeyProvider:               keyProvider,
+		idintKeyProvider:               keyProvider,
 	}
 }
 
@@ -753,7 +754,7 @@ func (d *dataPlane) Run(ctx context.Context) error {
 	}
 
 	if d.ExperimentalIDINT {
-		d.idIntKeyProvider.SetDialer(&libgrpc.TCPDialer{
+		d.idintKeyProvider.SetDialer(&libgrpc.TCPDialer{
 			SvcResolver: func(dst addr.SVC) []resolver.Address {
 				if base := dst.Base(); base != addr.SvcCS {
 					panic("Unsupported address type, implementation error?")
@@ -765,8 +766,12 @@ func (d *dataPlane) Run(ctx context.Context) error {
 				return targets
 			},
 		})
-		d.idIntKeyProvider.RunPrefetcher()
-		defer d.idIntKeyProvider.CancelAll()
+		d.idintKeyProvider.RunPrefetcher()
+		defer d.idintKeyProvider.CancelAll()
+		go func() {
+			defer log.HandlePanic()
+			d.idintCpuMeter.run(ctx)
+		}()
 	}
 
 	numConnections := 0
@@ -1273,7 +1278,7 @@ func (p *scionPacketProcessor) processIdInt(idintOpts []byte, meta *packetMeta) 
 	}
 	var err error
 	t := time.UnixMicro(int64(p.pkt.IngressTime / 1000))
-	key, err := p.d.idIntKeyProvider.GetASHostKey(t, verifIA, addr.HostIP(ip))
+	key, err := p.d.idintKeyProvider.GetASHostKey(t, verifIA, addr.HostIP(ip))
 	if err != nil {
 		if err == prv_drkey.ErrNotReady {
 			// TODO(lschulz): If there is already a hop entry from a sibling router, remove
@@ -1368,6 +1373,99 @@ func (p *scionPacketProcessor) getIntMetadata(meta *packetMeta) *slayers.IntMeta
 		case idint.InDeviceTypeRole:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = 0x0201
+		case idint.InCpuUserNow:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.idintCpuMeter.userNow.Load())
+		case idint.InCpuUser1Min:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.idintCpuMeter.userAvg1Min.Load())
+		case idint.InCpuUser5Min:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.idintCpuMeter.userAvg5Min.Load())
+		case idint.InCpuSysNow:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.idintCpuMeter.sysNow.Load())
+		case idint.InCpuSys1Min:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.idintCpuMeter.sysAvg1Min.Load())
+		case idint.InCpuSys5Min:
+			md.InstrDataLen[i] = 2
+			md.InstrData[i] = uint64(p.d.idintCpuMeter.sysAvg5Min.Load())
+		case idint.InCpuRunnableNow:
+			if p.d.idintCpuMeter.schedAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.runnableNow.Load())
+			}
+		case idint.InCpuRunnable1Min:
+			if p.d.idintCpuMeter.schedAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.runnableAvg1Min.Load())
+			}
+		case idint.InCpuRunnable5Min:
+			if p.d.idintCpuMeter.schedAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.runnableAvg5Min.Load())
+			}
+		case idint.InHostCpuNow:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.hostNow[hostCpuNotIdle].Load())
+			}
+		case idint.InHostCpu1Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host1Min[hostCpuNotIdle].Load())
+			}
+		case idint.InHostCpu5Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host5Min[hostCpuNotIdle].Load())
+			}
+		case idint.InHostCpuUserNow:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.hostNow[hostCpuUser].Load())
+			}
+		case idint.InHostCpuUser1Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host1Min[hostCpuUser].Load())
+			}
+		case idint.InHostCpuUser5Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host5Min[hostCpuUser].Load())
+			}
+		case idint.InHostCpuSysNow:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.hostNow[hostCpuSys].Load())
+			}
+		case idint.InHostCpuSys1Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host1Min[hostCpuSys].Load())
+			}
+		case idint.InHostCpuSys5Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host5Min[hostCpuSys].Load())
+			}
+		case idint.InHostCpuSoftIrqNow:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.hostNow[hostCpuSoftIrq].Load())
+			}
+		case idint.InHostCpuSoftIrq1Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host1Min[hostCpuSoftIrq].Load())
+			}
+		case idint.InHostCpuSoftIrq5Min:
+			if p.d.idintCpuMeter.hostCpuAvail {
+				md.InstrDataLen[i] = 2
+				md.InstrData[i] = uint64(p.d.idintCpuMeter.host5Min[hostCpuSoftIrq].Load())
+			}
 		case idint.InSoftwareVersion:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = uint64(idintStartupVersion)
@@ -1377,6 +1475,13 @@ func (p *scionPacketProcessor) getIntMetadata(meta *packetMeta) *slayers.IntMeta
 		case idint.InEgressPortSpeed:
 			md.InstrDataLen[i] = 4
 			md.InstrData[i] = min(uint64(egress.OutputMeter.linkSpeed)/1000_0000, math.MaxUint32)
+		case idint.InUptime:
+			md.InstrData[i] = 4
+			var uptime uint64
+			if p.pkt.IngressTime > idintStartupTime {
+				uptime = (p.pkt.IngressTime - idintStartupTime) / 1000_0000_0000
+			}
+			md.InstrData[i] = min(uptime, math.MaxUint32)
 		case idint.InRttNextBr:
 			if bfd := p.d.interfaces[p.pkt.egress].BFDSession(); bfd != nil {
 				if rtt, ok := bfd.RTT(); ok {

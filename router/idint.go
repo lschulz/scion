@@ -17,6 +17,7 @@ package router
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/scionproto/scion/private/env"
 )
@@ -54,4 +55,6 @@ func idintEncodeVersion(raw string) uint32 {
 var (
 	// Router version in the format of the ID-INT SOFTWARE_VERSION instruction.
 	idintStartupVersion = idintEncodeVersion(env.StartupVersion)
+	// Unix time the router was started at in nanoseconds.
+	idintStartupTime = uint64(time.Now().UnixNano())
 )

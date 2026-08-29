@@ -58,10 +58,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/procfs"
+	"golang.org/x/sys/unix"
 
 	"github.com/scionproto/scion/pkg/private/serrors"
 )
@@ -90,6 +93,34 @@ var (
 		"The number of time the processmetrics collector recreated its list of tasks.",
 		nil, nil,
 	)
+)
+
+// userHz returns the kernel's USER_HZ. This is almost always 100. If determining
+// USER_HZ from the system fails, 100 is returned together with an error.
+var userHz = sync.OnceValues(func() (int64, error) {
+	const defaultUserHz = 100
+	// Linux passes USER_HZ to processes through the ELF auxiliary vector
+	auxv, err := unix.Auxv()
+	if err != nil {
+		return defaultUserHz, serrors.Wrap("ELF auxiliary vector not accessible", err)
+	}
+	for _, entry := range auxv {
+		if entry[0] == 17 { // AT_CLKTCK
+			if entry[1] == 0 {
+				return defaultUserHz, serrors.Wrap("AT_CLKTCK is zero", err)
+			}
+			return int64(entry[1]), nil
+		}
+	}
+	return defaultUserHz, serrors.New("AT_CLKTCK not found in ELF auxiliary vector")
+})
+
+var (
+	// collectorMtx guards access to the collector. The collector is shared
+	// between prometheus and ReadSchedTime.
+	collectorMtx sync.Mutex
+	// Collector created by Init().
+	collector *procStatCollector
 )
 
 // procStatCollector is a custom collector for some process-wide statistics
@@ -168,17 +199,21 @@ func (c *procStatCollector) Describe(ch chan<- *prometheus.Desc) {
 // Because raw metrics are very few and not expensive to get, Collect
 // currently calls updateStat() every time to get the latest.
 func (c *procStatCollector) Collect(ch chan<- prometheus.Metric) {
+	collectorMtx.Lock()
 	_ = c.updateStat()
+	totalRunning, totalRunnable := c.totalRunning, c.totalRunnable
+	taskListUpdates := c.taskListUpdates
+	collectorMtx.Unlock()
 
 	ch <- prometheus.MustNewConstMetric(
 		runningTime,
 		prometheus.CounterValue,
-		float64(c.totalRunning)/1000000000, // Report duration in SI
+		float64(totalRunning)/1000000000, // Report duration in SI
 	)
 	ch <- prometheus.MustNewConstMetric(
 		runnableTime,
 		prometheus.CounterValue,
-		float64(c.totalRunnable)/1000000000, // Report duration in SI
+		float64(totalRunnable)/1000000000, // Report duration in SI
 	)
 	ch <- prometheus.MustNewConstMetric(
 		goCores,
@@ -188,8 +223,58 @@ func (c *procStatCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		tasklistUpdates,
 		prometheus.CounterValue,
-		float64(c.taskListUpdates),
+		float64(taskListUpdates),
 	)
+}
+
+// ReadProcCpuTime returns the CPU time consumed by all threads of this process.
+func ReadProcCpuTime() (ProcCpuTime, error) {
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		return ProcCpuTime{}, serrors.Wrap("getrusage failed", err)
+	}
+	return ProcCpuTime{
+		User: time.Duration(usage.Utime.Nano()),
+		Sys:  time.Duration(usage.Stime.Nano()),
+	}, nil
+}
+
+// ReadHostCpuTime returns the CPU time consumed by all processes on the system.
+// The counters read by this function have a resolution that is limited by the
+// clock tick, usually 10 ms. ReadHostCpuTime parses /proc/stat and is more
+// expensive than ReadProcCpuTime.
+func ReadHostCpuTime() (HostCpuTime, error) {
+	f, err := os.Open(filepath.Join(procfs.DefaultMountPoint, "stat"))
+	if err != nil {
+		return HostCpuTime{}, serrors.Wrap("opening /proc/stat failed", err)
+	}
+	defer f.Close()
+	var buf [256]byte
+	n, err := f.Read(buf[:])
+	if err != nil {
+		return HostCpuTime{}, serrors.Wrap("reading from /proc/stat failed", err)
+	}
+	hz, _ := userHz()
+	return parseHostCPUTime(buf[:n], hz)
+}
+
+// ReadSchedTime returns the scheduler statistics of all threads of this
+// process. Init must have been called successfully before this function,
+// otherwise an error is returned. This function is much more expensive then
+// ReadProcCpuTime.
+func ReadSchedTime() (SchedTime, error) {
+	collectorMtx.Lock()
+	defer collectorMtx.Unlock()
+	if collector == nil {
+		return SchedTime{}, serrors.New("process metrics have not been initialized")
+	}
+	if err := collector.updateStat(); err != nil {
+		return SchedTime{}, err
+	}
+	return SchedTime{
+		Running:  time.Duration(collector.totalRunning),
+		Runnable: time.Duration(collector.totalRunnable),
+	}, nil
 }
 
 // Init creates a new collector for process statistics.
@@ -218,11 +303,20 @@ func Init() error {
 		return serrors.Wrap("First update failed", err)
 	}
 
-	// It works. Register it so prometheus milks it.
+	// It works. Make it available to ReadSchedTime and register it so
+	// prometheus milks it.
+	collectorMtx.Lock()
+	collector = c
+	collectorMtx.Unlock()
 	err = prometheus.Register(c)
 	if err != nil {
 		return serrors.Wrap("Registration failed", err)
 	}
 
+	// Cache USER_HZ now. If determining USER_HZ fails, report the error and
+	// assume the new universal default of 100 Hz.
+	if _, err := userHz(); err != nil {
+		return serrors.Wrap("Could not determine USER_HZ, assuming 100 Hz", err)
+	}
 	return nil
 }
