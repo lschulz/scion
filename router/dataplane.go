@@ -1471,15 +1471,15 @@ func (p *scionPacketProcessor) getIntMetadata(meta *packetMeta) *slayers.IntMeta
 			md.InstrData[i] = uint64(idintStartupVersion)
 		case idint.InIngressPortSpeed:
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = min(uint64(ingress.InputMeter.linkSpeed)/1000_0000, math.MaxUint32)
+			md.InstrData[i] = min(uint64(ingress.InputMeter.linkSpeed)/1_000_000, math.MaxUint32)
 		case idint.InEgressPortSpeed:
 			md.InstrDataLen[i] = 4
-			md.InstrData[i] = min(uint64(egress.OutputMeter.linkSpeed)/1000_0000, math.MaxUint32)
+			md.InstrData[i] = min(uint64(egress.OutputMeter.linkSpeed)/1_000_000, math.MaxUint32)
 		case idint.InUptime:
-			md.InstrData[i] = 4
+			md.InstrDataLen[i] = 4
 			var uptime uint64
 			if p.pkt.IngressTime > idintStartupTime {
-				uptime = (p.pkt.IngressTime - idintStartupTime) / 1000_0000_0000
+				uptime = (p.pkt.IngressTime - idintStartupTime) / 1_000_000_000
 			}
 			md.InstrData[i] = min(uptime, math.MaxUint32)
 		case idint.InRttNextBr:
