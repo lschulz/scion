@@ -23,7 +23,6 @@ import (
 	"math"
 	"math/big"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gopacket/gopacket/layers"
@@ -43,16 +42,17 @@ const (
 	// session that is down does not change the state. However, having such a timer
 	// simplifies the Go implementation's timer Stop/Reset code.
 	defaultDetectionTimeout = time.Minute
-	// initialRTTMeasurementInterval is the initial interval between sending poll packets to
-	// estimate the RTT. The effective measurement interval is scaled between 2*desiredMinTXInterval
-	// and maxRTTMeasurementInterval.
+	// initialRTTMeasurementInterval is the initial interval between Poll Sequences used to
+	// estimate the RTT. The effective measurement interval is scaled between
+	// 2*desiredMinTXInterval and maxRTTMeasurementInterval. The Poll bit is set on the next
+	// periodic packet after the interval elapsed.
 	initialRTTMeasurementInterval = 500 * time.Millisecond
 	// maxRTTMeasurementInterval is the maximum interval between attempting Poll sequences for RTT
 	// estimation. If the remote session does not respond to Poll packets, the measurement will
 	// settle to this interval.
 	maxRTTMeasurementInterval = 10 * time.Second
-	// defaultRTTEWMAWeigh is the default value for RTTEWMAWeight.
-	defaultRTTEWMAWeigh = 0.5
+	// defaultRTTEWMAWeight is the default value for RTTEWMAWeight.
+	defaultRTTEWMAWeight = 0.5
 )
 
 // ErrAlreadyRunning is the error returned by session run function when called repeatedly.
@@ -75,8 +75,14 @@ var ErrAlreadyRunning = errors.New("is running")
 // Session does not support the BFD Echo function. Therefore, the Required Min Echo RX field is
 // always set to 0.
 //
-// Poll Sequences (RFC 5880 Section 6.5) are supported and can optionally (if EnableRTTEstimate is
-// true) be used to estimate the RTT between border routers.
+// Poll Sequences are supported. If EnableRTTEstimate is true periodic Poll Sequences are used to
+// estimate the RTT between border routers. As required by RFC 5880 Section 6.5, Poll Sequences are
+// initiated by setting the Poll bit on a scheduled packet; no additional packets are sent. Each
+// Poll Sequence consists of a single Poll packet. If no final is received before the next periodic
+// transmission, the sequence is abandoned without an RTT sample. Consequently, only RTTs shorter
+// than 75% (BFD allows 25% jitter) of the transmission interval can be measured. The Poll bit is
+// set on at most one consecutive packet to maintain compatibility with old routers that discard all
+// Poll packets without updating the session state.
 type Session struct {
 	// Sender is used by the Session to send BFD messages to the other end of the point to point
 	// link.
@@ -85,14 +91,8 @@ type Session struct {
 	Sender Sender
 
 	// LocalDiscriminator is the local discriminator for this BFD session, used
-	// to uniquely identify it on the local system. It must be nonzero. If RTT
-	// estimation is enabled, the actual discriminator changes every measurement
-	// interval to help identify outdated responses.
+	// to uniquely identify it on the local system. It must be nonzero.
 	LocalDiscriminator layers.BFDDiscriminator
-
-	// The true current local discriminator if RTT estimation is enabled.
-	// Initialized from LocalDiscriminator.
-	localDiscriminator atomic.Uint32
 
 	// RemoteDiscriminator is the remote discriminator for this BFD session, as chosen
 	// by the remote system. If the Session has been bootstrapped via an external
@@ -146,8 +146,7 @@ type Session struct {
 	// until the session is ready to read it.
 	ReceiveQueueSize int
 
-	// EstimateRTT enables RTT estimation by Poll Sequences. This also causes local discriminator
-	// to change frequently.
+	// EnableRTTEstimate enables RTT estimation by Poll Sequences.
 	EnableRTTEstimate bool
 
 	// Weight for new samples in exponentially weighted moving average that estimates the session
@@ -183,9 +182,11 @@ type Session struct {
 	// remote system in a BFD Control packet.
 	remoteMinRxInterval time.Duration
 
+	// pollScheduled is true if the next periodic control packet should start a Poll Sequence.
+	pollScheduled bool
 	// pollInFlight is true if a poll sequence is in progress.
 	pollInFlight bool
-	// pollSendTime is the last time a control packet with the Poll bit was sent.
+	// pollSendTime is the time at which a packet with the Poll bit was sent.
 	pollSendTime time.Time
 	// lastSuccessfulPoll is the last time the RTT was updated successfully.
 	lastSuccessfulPoll time.Time
@@ -238,7 +239,7 @@ func NewSession(s Sender, cfg control.BFD, metrics Metrics) (*Session, error) {
 
 func (s *Session) String() string {
 	return fmt.Sprintf("local_disc %v, remote_disc %v, sender %v",
-		s.getLocalDiscriminator(), s.getRemoteDiscriminator(), s.Sender)
+		s.LocalDiscriminator, s.getRemoteDiscriminator(), s.Sender)
 }
 
 // Run initializes the Session's timers and state machine, and starts sending out BFD control
@@ -253,7 +254,6 @@ func (s *Session) Run(ctx context.Context) error {
 	if err := s.validateParameters(); err != nil {
 		return err
 	}
-	s.setLocalDiscriminator(s.LocalDiscriminator)
 	if s.RemoteDiscriminator != 0 {
 		s.setRemoteDiscriminator(s.RemoteDiscriminator)
 	}
@@ -318,14 +318,11 @@ MainLoop:
 			// a packet with Poll clear and Final set as soon as practicable without respect to the
 			// transmission timer.
 			if msg.Poll {
-				s.setRemoteDiscriminator(msg.MyDiscriminator)
 				s.sendFinal(pkt, logger)
 			} else if msg.Final && s.pollInFlight {
-				if msg.YourDiscriminator == s.getLocalDiscriminator() {
-					s.pollInFlight = false
-					s.updateRTT(msg.ReceivedAt.Sub(s.pollSendTime))
-					rttInterval = max((3*rttInterval)/4, 2*s.desiredMinTXInterval)
-				}
+				s.pollInFlight = false
+				s.updateRTT(msg.ReceivedAt.Sub(s.pollSendTime))
+				rttInterval = max((3*rttInterval)/4, 2*s.desiredMinTXInterval)
 			}
 
 			// If we transitioned out of the down state, we cancel the current send timer
@@ -355,10 +352,21 @@ MainLoop:
 				Version:               1,
 				State:                 layers.BFDState(s.getLocalState()),
 				DetectMultiplier:      s.DetectMult,
-				MyDiscriminator:       s.getLocalDiscriminator(),
+				MyDiscriminator:       s.LocalDiscriminator,
 				YourDiscriminator:     s.remoteDiscriminator,
 				DesiredMinTxInterval:  desiredMinTxInterval,
 				RequiredMinRxInterval: requiredMinRxInterval,
+			}
+			if s.pollInFlight {
+				// No final received within one transmission interval, either because the RTT is
+				// higher than the interval or the poll was dropped.
+				s.pollInFlight = false
+				rttInterval = min(2*rttInterval, maxRTTMeasurementInterval)
+			} else if s.pollScheduled && s.getLocalState() == stateUp {
+				s.pollScheduled = false
+				s.pollInFlight = true
+				s.pollSendTime = time.Now()
+				pkt.Poll = true
 			}
 
 			if err := s.Sender.Send(pkt); err != nil {
@@ -374,18 +382,10 @@ MainLoop:
 			}
 
 		case <-pollTimerC:
-			if s.getLocalState() != stateUp {
-				pollTimer.Reset(rttInterval)
-				break
-			}
-
-			if s.pollInFlight {
-				// No final received for the last poll, increase rttInterval
-				s.pollInFlight = false
-				rttInterval = min(2*rttInterval, maxRTTMeasurementInterval)
-			}
 			pollTimer.Reset(rttInterval)
-			s.sendPoll(pkt, logger)
+			if s.getLocalState() == stateUp && !s.pollInFlight {
+				s.pollScheduled = true
+			}
 
 		case <-detectionTimer.C:
 			// detection timer guaranteed to be expired, so we can reset. We reset s.t. if some
@@ -398,6 +398,7 @@ MainLoop:
 				// Change the desired interval back to the default transmission interval, to
 				// avoid flooding the network while the session is down.
 				s.desiredMinTXInterval = defaultTransmissionInterval
+				s.pollScheduled = false
 				s.pollInFlight = false
 				s.rttLock.Lock()
 				s.rttEstimate = 0
@@ -413,42 +414,6 @@ MainLoop:
 	return nil
 }
 
-func (s *Session) sendPoll(pkt *layers.BFD, logger log.Logger) {
-
-	disc, err := rand.Int(rand.Reader, big.NewInt(math.MaxUint32-1))
-	if err != nil {
-		logger.Debug("error generating random discriminator", "err", err)
-		return
-	}
-	s.setLocalDiscriminator(layers.BFDDiscriminator(uint32(disc.Uint64()) + 1))
-
-	desiredMinTxInterval, _ := durationToBFDInterval(s.desiredMinTXInterval)
-	requiredMinRxInterval, _ := durationToBFDInterval(s.RequiredMinRxInterval)
-	*pkt = layers.BFD{
-		Version:               1,
-		Poll:                  true,
-		State:                 layers.BFDState(s.getLocalState()),
-		DetectMultiplier:      s.DetectMult,
-		MyDiscriminator:       s.getLocalDiscriminator(),
-		YourDiscriminator:     s.remoteDiscriminator,
-		DesiredMinTxInterval:  desiredMinTxInterval,
-		RequiredMinRxInterval: requiredMinRxInterval,
-	}
-
-	s.pollSendTime = time.Now()
-	s.pollInFlight = true
-	if err := s.Sender.Send(pkt); err != nil {
-		logger.Debug("error sending poll", "err", err)
-		return
-	}
-	if s.testLogger != nil {
-		s.testLogger.Debug("poll sent", "localDiscriminator", pkt.MyDiscriminator)
-	}
-	if s.Metrics.PacketsSent != nil {
-		s.Metrics.PacketsSent.Add(1)
-	}
-}
-
 func (s *Session) sendFinal(pkt *layers.BFD, logger log.Logger) {
 	desiredMinTxInterval, _ := durationToBFDInterval(s.desiredMinTXInterval)
 	requiredMinRxInterval, _ := durationToBFDInterval(s.RequiredMinRxInterval)
@@ -457,7 +422,7 @@ func (s *Session) sendFinal(pkt *layers.BFD, logger log.Logger) {
 		Final:                 true,
 		State:                 layers.BFDState(s.getLocalState()),
 		DetectMultiplier:      s.DetectMult,
-		MyDiscriminator:       s.getLocalDiscriminator(),
+		MyDiscriminator:       s.LocalDiscriminator,
 		YourDiscriminator:     s.remoteDiscriminator,
 		DesiredMinTxInterval:  desiredMinTxInterval,
 		RequiredMinRxInterval: requiredMinRxInterval,
@@ -477,7 +442,7 @@ func (s *Session) sendFinal(pkt *layers.BFD, logger log.Logger) {
 func (s *Session) updateRTT(sample time.Duration) {
 	w := s.RTTEWMAWeight
 	if w <= 0 {
-		w = defaultRTTEWMAWeigh
+		w = defaultRTTEWMAWeight
 	}
 	now := time.Now()
 	s.rttLock.Lock()
@@ -583,13 +548,6 @@ func (s *Session) setLocalState(st state) {
 	s.localState = st
 }
 
-func (s *Session) getLocalDiscriminator() layers.BFDDiscriminator {
-	return (layers.BFDDiscriminator)(s.localDiscriminator.Load())
-}
-
-func (s *Session) setLocalDiscriminator(d layers.BFDDiscriminator) {
-	s.localDiscriminator.Store(uint32(d))
-}
 func (s *Session) getRemoteDiscriminator() layers.BFDDiscriminator {
 	s.remoteDiscriminatorMtx.Lock()
 	defer s.remoteDiscriminatorMtx.Unlock()

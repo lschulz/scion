@@ -925,7 +925,7 @@ func TestRTTEstimation(t *testing.T) {
 		},
 		"poll sequence not supported": {
 			sessionA: &bfd.Session{
-				DetectMult:            1,
+				DetectMult:            3,
 				DesiredMinTxInterval:  200 * time.Millisecond,
 				RequiredMinRxInterval: 100 * time.Millisecond,
 				LocalDiscriminator:    1,
@@ -934,7 +934,7 @@ func TestRTTEstimation(t *testing.T) {
 				EnableRTTEstimate:     true,
 			},
 			sessionB: &bfd.Session{
-				DetectMult:            1,
+				DetectMult:            3,
 				DesiredMinTxInterval:  200 * time.Millisecond,
 				RequiredMinRxInterval: 100 * time.Millisecond,
 				LocalDiscriminator:    2,
@@ -944,6 +944,9 @@ func TestRTTEstimation(t *testing.T) {
 			},
 			expectedUpA: true,
 			expectedUpB: true,
+			// Since Poll bits for RTT estimation are set on periodic packets, sessionB misses a
+			// packet every time sessionA attempts a Poll Sequence. sessionA should abandon the Poll
+			// Sequence after missing a Final, so this should not take down the session.
 			testBehavior: func(linkAToB, linkBToA *redirectSender) {
 				linkAToB.DiscardPoll(true) // sessionB does not support poll sequences
 				linkAToB.Sending(true)
