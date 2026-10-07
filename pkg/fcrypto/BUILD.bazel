@@ -4,16 +4,16 @@ load("//tools:go.bzl", "go_test")
 go_library(
     name = "go_default_library",
     srcs = [
-        "crypto.c",
         "crypto.go",
         "crypto.h",
+        "crypto_amd64.c",
         "crypto_amd64.go",
         "crypto_slow.go",
     ],
     cgo = True,
     copts = select({
         "@rules_go//go/platform:amd64": [
-            "-march=native",
+            "-maes -msse4.1",
         ],
         "//conditions:default": [],
     }),

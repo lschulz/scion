@@ -16,7 +16,7 @@
 
 package fcrypto
 
-// #cgo CFLAGS: -march=native
+// #cgo CFLAGS: -maes -msse4.1
 // #include "crypto.h"
 import "C"
 import (
