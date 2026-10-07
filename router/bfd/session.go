@@ -78,7 +78,7 @@ var ErrAlreadyRunning = errors.New("is running")
 // Poll Sequences are supported. If EnableRTTEstimate is true periodic Poll Sequences are used to
 // estimate the RTT between border routers. As required by RFC 5880 Section 6.5, Poll Sequences are
 // initiated by setting the Poll bit on a scheduled packet; no additional packets are sent. Each
-// Poll Sequence consists of a single Poll packet. If no final is received before the next periodic
+// Poll Sequence consists of a single Poll packet. If no Final is received before the next periodic
 // transmission, the sequence is abandoned without an RTT sample. Consequently, only RTTs shorter
 // than 75% (BFD allows 25% jitter) of the transmission interval can be measured. The Poll bit is
 // set on at most one consecutive packet to maintain compatibility with old routers that discard all
